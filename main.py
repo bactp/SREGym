@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 import csv
 import importlib
+import json
 import logging
 import os
 import sys
@@ -495,6 +496,37 @@ def driver_loop(
                             )
                         except Exception as exc:  # defensive: never abort a run
                             logger.warning(f"⚠️ ATIF trajectory DB ingest failed: {exc}")
+
+                        # Surface LLM-turn/tool-call/token metrics into the results CSV for
+                        # whichever agent produced a trajectory (agent-agnostic - runs for any
+                        # tool with an ATIF adapter, not just one specific client). `snapshot` is
+                        # the same dict object already appended to `all_results_for_agent`, so
+                        # mutating it here also updates that entry; the CSV just needs rewriting.
+                        try:
+                            from collections import Counter
+
+                            traj = json.loads(trajectory_path.read_text())
+                            final = traj.get("final_metrics") or {}
+                            tool_calls = [
+                                tc["function_name"]
+                                for step in traj.get("steps", [])
+                                for tc in (step.get("tool_calls") or [])
+                            ]
+                            snapshot["Metrics.total_steps"] = final.get("total_steps")
+                            snapshot["Metrics.total_tool_calls"] = len(tool_calls)
+                            snapshot["Metrics.tool_call_breakdown"] = dict(Counter(tool_calls))
+                            snapshot["Metrics.total_prompt_tokens"] = final.get("total_prompt_tokens")
+                            snapshot["Metrics.total_completion_tokens"] = final.get("total_completion_tokens")
+                            snapshot["Metrics.total_cached_tokens"] = final.get("total_cached_tokens")
+                            snapshot["Metrics.total_cost_usd"] = final.get("total_cost_usd")
+
+                            fieldnames = sorted({key for row in all_results_for_agent for key in row})
+                            with open(tmp_path, "w", newline="") as csvfile:
+                                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                                writer.writeheader()
+                                writer.writerows(all_results_for_agent)
+                        except Exception as exc:  # defensive: never abort a run over metrics enrichment
+                            logger.warning(f"⚠️ Could not merge trajectory metrics into results CSV: {exc}")
                     else:
                         logger.warning(f"⚠️ ATIF trajectory conversion skipped for {published_run_dir}")
 
@@ -568,7 +600,13 @@ def main(args):
     )
 
     if not args.use_external_harness:
-        run_judge_preflight_check()
+        if args.skip_judge_preflight:
+            logger.warning(
+                "⚠️  Skipping judge pre-flight check (--skip-judge-preflight). If the judge model is "
+                "actually unreachable, scoring will fail later instead of failing fast now."
+            )
+        else:
+            run_judge_preflight_check()
 
     # Only build/check agent container image if the agent requires it
     agent_reg = (
@@ -718,7 +756,29 @@ if __name__ == "__main__":
         default=None,
         help="Resume from a previous results CSV file. Problems already in the CSV will be skipped.",
     )
+    parser.add_argument(
+        "--env-file",
+        type=str,
+        default=".env",
+        help="Path to a .env file to load credentials/config from before anything else runs "
+        "(default: .env in the current directory, silently skipped if it doesn't exist).",
+    )
+    parser.add_argument(
+        "--skip-judge-preflight",
+        action="store_true",
+        help="Skip the judge model pre-flight sanity check. Useful when the judge credential isn't "
+        "in this shell's environment yet (e.g. a .env file wasn't picked up) or when the agent under "
+        "test manages its own credentials independently of this host process. Scoring will still fail "
+        "later if the judge is genuinely unreachable — this only removes the early fail-fast check.",
+    )
     args = parser.parse_args()
+
+    # Load .env before anything else reads the environment (judge preflight, model env setup, etc.)
+    from dotenv import load_dotenv
+
+    if os.path.isfile(args.env_file):
+        load_dotenv(args.env_file)
+        print(f"🔧 Loaded environment from {args.env_file}")
 
     # Validate that n_attempts is positive
     if args.n_attempts is not None and args.n_attempts < 1:

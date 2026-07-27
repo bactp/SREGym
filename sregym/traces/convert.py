@@ -122,6 +122,11 @@ def _find_gemini_session_file(run_dir: Path) -> Path | None:
     return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
 
 
+def _find_kagent_invoke_result(run_dir: Path) -> Path | None:
+    candidates = list(run_dir.glob("*_kagent_invoke_result.json"))
+    return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
+
+
 def _find_session_file(run_dir: Path, tool: str) -> Path | None:
     """Resolve a canonical SREGym run directory to its native session file."""
     if tool == "codex":
@@ -131,6 +136,8 @@ def _find_session_file(run_dir: Path, tool: str) -> Path | None:
         return path if path.is_file() else None
     if tool == "gemini":
         return _find_gemini_session_file(run_dir)
+    if tool == "kagent":
+        return _find_kagent_invoke_result(run_dir)
     if tool == "opencode":
         candidates = sorted((run_dir / "sessions").rglob("session-*.json"))
         return candidates[0] if candidates else None
@@ -300,6 +307,19 @@ def build_sregym_meta(run_dir: Path, info: RunPathInfo) -> dict[str, Any]:
     return meta
 
 
+def _resolve_adapter_tool(tool: str) -> str:
+    """Map a per-instance agents.yaml tool name onto its converter/adapter key.
+
+    ``agents.yaml`` can register multiple KAgent-backed agents (e.g. ``kagent``,
+    ``kagent-sre2``, ...) that all share the same ``clients/kagent/driver.py`` and
+    therefore the same raw artifact shape and ATIF adapter - normalize the whole
+    ``kagent``/``kagent-*`` family onto the single registered ``"kagent"`` adapter.
+    """
+    if tool == "kagent" or tool.startswith("kagent-"):
+        return "kagent"
+    return tool
+
+
 def convert_run(run_dir: Path | str) -> Trajectory | None:
     """Convert one canonical run directory into a validated ATIF trajectory.
 
@@ -307,14 +327,15 @@ def convert_run(run_dir: Path | str) -> Trajectory | None:
     """
     run_dir = Path(run_dir)
     info = parse_run_path(run_dir)
+    adapter_tool = _resolve_adapter_tool(info.tool)
 
-    if info.tool not in SUPPORTED_AGENTS:
+    if adapter_tool not in SUPPORTED_AGENTS:
         logger.debug("No ATIF adapter for tool %r (%s)", info.tool, run_dir)
         return None
 
     sregym_meta = build_sregym_meta(run_dir, info)
 
-    trajectory = _convert_native_run(run_dir, info.tool)
+    trajectory = _convert_native_run(run_dir, adapter_tool)
     if trajectory is None:
         return None
 

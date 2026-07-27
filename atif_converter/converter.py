@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Literal, cast
 
-from .adapters import claudecode, codex, copilot, gemini, opencode, stratus
+from .adapters import claudecode, codex, copilot, gemini, kagent, opencode, stratus
 from .atif import Trajectory
 from .errors import (
     AtifConverterError,
@@ -15,12 +15,13 @@ from .errors import (
     UnsupportedFormatError,
 )
 
-AgentName = Literal["claudecode", "codex", "copilot", "gemini", "opencode", "stratus"]
+AgentName = Literal["claudecode", "codex", "copilot", "gemini", "kagent", "opencode", "stratus"]
 SUPPORTED_AGENTS: tuple[AgentName, ...] = (
     "claudecode",
     "codex",
     "copilot",
     "gemini",
+    "kagent",
     "opencode",
     "stratus",
 )
@@ -30,6 +31,7 @@ _CONVERTERS = {
     "codex": codex.convert_file,
     "copilot": copilot.convert_file,
     "gemini": gemini.convert_file,
+    "kagent": kagent.convert_file,
     "opencode": opencode.convert_file,
     "stratus": stratus.convert_file,
 }
@@ -146,6 +148,15 @@ def _looks_like_gemini(root: dict | None, records: list[dict]) -> bool:
     )
 
 
+def _looks_like_kagent(root: dict | None) -> bool:
+    if not root or not isinstance(root.get("history"), list):
+        return False
+    return any(
+        isinstance(item, dict) and isinstance(item.get("metadata"), dict) and "kagent_app_name" in item["metadata"]
+        for item in root["history"]
+    )
+
+
 def _looks_like_stratus(records: list[dict]) -> bool:
     return any(
         record.get("type") == "event" and "stage" in record and isinstance(record.get("messages"), list)
@@ -206,6 +217,8 @@ def detect_agent(session_file: Path | str) -> AgentName:
 
     if _looks_like_opencode(root):
         return "opencode"
+    if _looks_like_kagent(root):
+        return "kagent"
     if _looks_like_gemini(root, records):
         return "gemini"
     if _looks_like_stratus(records):

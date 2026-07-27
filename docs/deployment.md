@@ -92,18 +92,12 @@ uv sync              # creates .venv with Python 3.12 + all deps
 uv run python main.py --help    # smoke test
 ```
 
-## 3. Kubeconfig placement — ⚠️ non-obvious
+## 3. Kubeconfig placement
 
-**SREGym deliberately ignores `$KUBECONFIG` in its `KubernetesAPIProxy` component**
-(`sregym/service/k8s_proxy.py:84-87` — it always loads `~/.kube/config` to avoid a circular
-dependency once its own filtering proxy is active). If the target kubeconfig is not at the
-default path, `Conductor.__init__` crashes with:
-
-```
-kubernetes.config.config_exception.ConfigException: Invalid kube-config file. No configuration found.
-```
-
-Fix:
+**`KubernetesAPIProxy` now honors `$KUBECONFIG`** (fixed 2026-07-27, `sregym/service/k8s_proxy.py:
+_resolve_kubeconfig_path()`) — it used to always load `~/.kube/config` regardless of the
+environment, which was a common source of confusion. If `$KUBECONFIG` is unset, it still falls
+back to `~/.kube/config`, so the simplest setup remains the same:
 
 ```bash
 mkdir -p ~/.kube
@@ -112,8 +106,15 @@ chmod 600 ~/.kube/config
 kubectl config current-context     # must show the TARGET (workload) cluster
 ```
 
-> Everything SREGym deploys/injects goes to whatever cluster `~/.kube/config` points at.
-> Double-check this before every run if you work with multiple clusters.
+If you'd rather not touch `~/.kube/config` (e.g. it's already used for something else, or you
+juggle multiple target clusters), export `KUBECONFIG=~/sre-test1.kubeconfig` in the shell that
+launches `main.py` instead — SREGym will use that.
+
+> Everything SREGym deploys/injects goes to whatever kubeconfig is active (`$KUBECONFIG` if set,
+> else `~/.kube/config`). Double-check this before every run if you work with multiple clusters.
+> Note: a few oracle-evaluation code paths (`clients/stratus/weak_oracles/{workload_oracle,
+> cluster_state_oracle}.py`) *intentionally* bypass this and read the real cluster directly — they
+> need the unfiltered ground truth, not the agent-facing filtered view. That's by design, not a bug.
 
 ## 4. SSH setup for OS-level fault injection
 
@@ -287,13 +288,31 @@ EOF
 
 ## 7. API key and environment
 
-SREGym has **no `.env` support** — the LLM key must be a real environment variable in the
-shell that launches `main.py` (LiteLLM reads it):
+The simplest option is still a real environment variable in the shell that launches `main.py`
+(LiteLLM reads it):
 
 ```bash
 echo 'export OPENAI_API_KEY="sk-..."' >> ~/.bashrc && source ~/.bashrc
 # (or ANTHROPIC_API_KEY / GEMINI_API_KEY / AGENT_API_BASE for self-hosted models)
 ```
+
+**`.env` support (added 2026-07-27):** `main.py` now also accepts `--env-file path/to/.env`
+(default `.env` in the current directory, silently skipped if it doesn't exist), loaded via
+`python-dotenv` *before* anything else reads the environment — including the judge pre-flight
+check. Useful when the shell that actually launches `main.py` isn't the same one you normally
+export credentials in (a cron job, a different tool/process, etc.):
+
+```bash
+echo 'OPENAI_API_KEY=sk-...' > .env && chmod 600 .env
+uv run python main.py --agent stratus --problem k8s_target_port-misconfig
+```
+
+There's also `--skip-judge-preflight`, for when you're confident the judge credential is fine
+(or the agent under test manages its own credentials entirely independently of this host
+process — see [`docs/kagent-integration.md`](./kagent-integration.md)) and don't want an
+unrelated preflight ping to abort the run early. Scoring still fails loudly later if the judge is
+genuinely unreachable — this only removes the *early* fail-fast check, it doesn't make the judge
+optional.
 
 ## 8. Run the first benchmark
 
@@ -356,7 +375,8 @@ results/traces.db                            # SQLite ingest of all trajectories
 | Symptom | Cause | Fix |
 |---|---|---|
 | `preflight failed: No module named 'fastapi'` | container requirements miss fastapi (upstream bug) | Patch 1 + `--force-build` |
-| `Invalid kube-config file. No configuration found.` at startup | target kubeconfig not at `~/.kube/config` (`$KUBECONFIG` ignored by design) | Section 3 |
+| `Invalid kube-config file. No configuration found.` at startup | neither `$KUBECONFIG` nor `~/.kube/config` points at a valid kubeconfig | Section 3 |
+| `❌ Judge pre-flight check failed` / process exits immediately | `OPENAI_API_KEY` (or equivalent) not present in *this specific* shell's environment | Section 7 — use `--env-file`, or `--skip-judge-preflight` if you're confident it's fine |
 | `observe` pods Pending: `untolerated taint {node.cloudprovider.kubernetes.io/uninitialized}` | stale CAPI taint, no CCM to clear it | Section 5.1 (+ Patches 3–4) |
 | Alertmanager stuck ContainerCreating: `CSINode ... does not contain driver driver.longhorn.io` | Longhorn CSI never scheduled on control-plane (taint) | untaint, wait for Longhorn DaemonSets to spread |
 | Taints reappear after every run | cleanup reconciles node taints from a stale baseline | Patch 4 |

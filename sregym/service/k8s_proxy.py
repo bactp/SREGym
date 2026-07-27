@@ -47,6 +47,19 @@ HIDDEN_LABELS: dict[str, set[str]] = {
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
+def _resolve_kubeconfig_path() -> str:
+    """Resolve the kubeconfig this proxy should read from.
+
+    Honors $KUBECONFIG if set, falling back to ~/.kube/config. This is resolved once, at
+    proxy-construction time, never re-read afterward - safe because neither real call site
+    mutates $KUBECONFIG before this resolves: the host conductor process never touches its own
+    $KUBECONFIG at all, and the in-cluster mcp-server pod (the only place that *does* repoint
+    $KUBECONFIG to this proxy's own generated config) does so only after already using
+    ServiceAccount credentials, never reaching this kubeconfig-loading branch in the first place.
+    """
+    return os.environ.get("KUBECONFIG") or os.path.expanduser("~/.kube/config")
+
+
 class KubernetesAPIProxy:
     """Manages the Kubernetes API filtering proxy."""
 
@@ -81,19 +94,17 @@ class KubernetesAPIProxy:
             self.api_port = int(os.environ.get("KUBERNETES_SERVICE_PORT", "443"))
         else:
             # Running outside the cluster — load from kubeconfig
-            # Always load from the default kubeconfig path, ignoring KUBECONFIG env var
-            # This prevents circular dependency if KUBECONFIG points to our proxy
-            default_kubeconfig = os.path.expanduser("~/.kube/config")
-            config.load_kube_config(config_file=default_kubeconfig)
+            kubeconfig_path = _resolve_kubeconfig_path()
+            config.load_kube_config(config_file=kubeconfig_path)
             self.api_host, self.api_port, self.ca_cert, self.client_cert, self.client_key = self._load_cluster_config(
-                kubeconfig_path=default_kubeconfig
+                kubeconfig_path=kubeconfig_path
             )
 
     def _load_cluster_config(self, kubeconfig_path: str | None = None):
         """Extract API server connection details from kubeconfig."""
         # Load full kubeconfig
         if kubeconfig_path is None:
-            kubeconfig_path = os.path.expanduser("~/.kube/config")
+            kubeconfig_path = _resolve_kubeconfig_path()
 
         # Get the current context's cluster and user from the explicit config file
         _, active_context = config.list_kube_config_contexts(config_file=kubeconfig_path)

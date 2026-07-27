@@ -378,6 +378,15 @@ uv run python main.py --agent kagent --problem k8s_target_port-misconfig --model
 (`--model` here only affects SREGym's own judge model — `sre-agent`'s own LLM calls are entirely
 governed by its `ModelConfig` CRD on the management cluster, independent of this flag.)
 
+Two host-side credential quirks worth knowing about with kagent runs specifically: `sre-agent`'s
+own OpenAI key lives entirely in a k8s Secret on the management cluster and needs nothing from the
+host shell, but the *judge* model (which grades the submission) still runs on the host and still
+needs `OPENAI_API_KEY` in whatever shell launches `main.py`. If that's inconvenient to guarantee
+(e.g. running from a tool/cron context with a different environment than your interactive shell),
+`main.py` now supports `--env-file path/to/.env` (loaded before anything else, default `.env` in
+the cwd) and `--skip-judge-preflight` (skips the early sanity ping if you're confident the judge
+credential is fine — scoring still fails loudly later if it genuinely isn't).
+
 ## 7. Adding another KAgent agent later
 
 `clients/kagent/driver.py` never hardcodes `sre-agent` — it reads the target agent name from the
@@ -420,12 +429,29 @@ Results at `SREGym/results/0727_0736/kagent/`.
 
 ## 9. Known gaps
 
-- **No ATIF trajectory conversion for kagent runs.** The driver saves the raw `kagent invoke`
-  JSON response, but doesn't translate it into SREGym's ATIF trajectory format, so
-  `results/.../run_1` logs "No convertible session" and the visualizer has nothing to render for
-  these runs. Doesn't affect CSV scoring (`Diagnosis.*`/`Mitigation.*`/`TTL`/`TTM` are all
-  populated normally). Would need mapping kagent's A2A task history (`history[]` in the invoke
-  JSON) onto ATIF's think/tool-call/observation event schema.
+- ~~No ATIF trajectory conversion for kagent runs~~ **Closed (2026-07-27).**
+  `atif_converter/adapters/kagent.py` now converts the raw `kagent invoke` JSON into a full ATIF
+  trajectory (pairing each `function_call`/`function_response` history item into one Step with
+  `tool_calls`+`observation`, and per-turn `metrics` from `kagent_usage_metadata`), registered in
+  `atif_converter/converter.py:SUPPORTED_AGENTS` and dispatched from
+  `sregym/traces/convert.py:_resolve_adapter_tool()` for the whole `kagent`/`kagent-*` family (so
+  any future `kagent-<name>` entry in `agents.yaml` gets ATIF support automatically, no extra
+  registration needed). `main.py` now also merges `Metrics.total_steps` /
+  `Metrics.total_tool_calls` / `Metrics.tool_call_breakdown` / `Metrics.total_prompt_tokens` /
+  `Metrics.total_completion_tokens` / `Metrics.total_cached_tokens` / `Metrics.total_cost_usd`
+  into every run's results-CSV row from whichever trajectory got produced — this is agent-agnostic
+  and applies equally to `stratus`/`codex`/`claudecode`/`gemini`/`opencode`, not just `kagent`.
+  Two things remain genuinely unavailable rather than merely unimplemented:
+  - **No cached/prefill token accounting.** kagent normalizes usage into a Gemini-shaped schema
+    (`candidatesTokenCount`/`promptTokenCount`/`totalTokenCount`) regardless of the underlying
+    provider, and never surfaces a cache-hit field — even though the real provider (e.g. OpenAI)
+    likely reports one internally. `Metrics.total_cached_tokens` is always `null` for kagent runs.
+  - **No per-tool-call latency/overhead.** The synchronous `kagent invoke` response has no
+    per-turn timestamps (only one top-level `status.timestamp`), so tool-call duration isn't
+    computable from it. Would need `kagent invoke --stream` with client-side timestamping, or
+    server-side timing added to SREGym's own MCP tool servers.
+  - `demo`/`tierzero`/`autosubmit` still have no ATIF adapter at all (unrelated to kagent) — their
+    runs still get no `Metrics.*` columns.
 - **Session scoping on the kubectl MCP tool is best-effort.** SREGym's kubectl MCP server keys
   its per-run tool state off a `sregym_ssid` header (falls back to a shared `None` key if
   absent — see `mcp_server/kubectl_mcp_tools.py:extract_session_id`); the current `sre-agent`
