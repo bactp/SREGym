@@ -61,3 +61,23 @@ agents:
     install_script: null
     agent_version: null
     container_isolation: false
+  - name: kagent
+    kickoff_command: python -m clients.kagent.driver
+    kickoff_workdir: .
+    kickoff_env:
+      KAGENT_KUBECONFIG: /home/ubuntu/mgmt.kubeconfig
+      KAGENT_AGENT_NAME: sre-agent
+      KAGENT_NAMESPACE: kagent
+    install_script: null
+    agent_version: null
+    container_isolation: false
+  - name: kagent-sre2
+    kickoff_command: python -m clients.kagent.driver
+    kickoff_workdir: .
+    kickoff_env:
+      KAGENT_KUBECONFIG: /home/ubuntu/mgmt.kubeconfig
+      KAGENT_AGENT_NAME: sre2
+      KAGENT_NAMESPACE: kagent
+    install_script: null
+    agent_version: null
+    container_isolation: false

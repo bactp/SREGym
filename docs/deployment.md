@@ -1,23 +1,48 @@
 # SREGym Deployment Guide — Step-by-Step Reproduction
 
 > Complete record of how SREGym was installed, configured, patched, and validated in our lab
-> (2026-07-16). Written because the upstream README is not detailed enough to reproduce a
-> working setup on a real (non-kind) cluster with an existing platform stack.
+> (2026-07-16, updated 2026-07-27). Written because the upstream README is not detailed enough
+> to reproduce a working setup on a real (non-kind) cluster with an existing platform stack.
 >
-> **Topology used here:**
-> - **Runner host:** `sre-control` — control node of the management cluster (Ubuntu, user `ubuntu`).
->   SREGym runs here as a host process, NOT as a Kubernetes workload.
-> - **Target cluster:** `sre-test1` — Kubernetes v1.32.8 (CAPI-provisioned), 1 control-plane +
->   2 workers, with a pre-existing platform stack: **Longhorn (default StorageClass), ArgoCD,
->   Flux, MetalLB, flannel**.
-> - Node name → IP mapping:
->   | K8s node name | IP |
->   |---|---|
->   | `sre-test1-control-plane-x77z8` | 192.168.28.184 |
->   | `sre-test1-md-0-n2wps-fwjk8` | 192.168.28.202 |
->   | `sre-test1-md-0-n2wps-zxtrt` | 192.168.28.191 |
-> - Credentials on the runner: `~/sre-test1.kubeconfig` (admin kubeconfig), `~/workflow-prj.pem`
->   (RSA-2048 SSH key for all nodes, user `ubuntu`, passwordless sudo).
+> See [`docs/kagent-integration.md`](./kagent-integration.md) for how KAgent-hosted agents are
+> plugged into this same setup as an additional `--agent` option.
+
+## Topology: one management cluster, N workload clusters
+
+This deployment follows a **hub-and-spoke pattern**: a single management cluster hosts the
+long-running control plane (SREGym itself, and separately KAgent — see the companion doc), and
+each workload/target cluster is a disposable, fault-injectable spoke that SREGym drives entirely
+through a kubeconfig. Nothing SREGym-specific runs *inside* a workload cluster except what a
+benchmark run deploys and tears down again (the app under test, Prometheus/Jaeger/Loki, the MCP
+tool server) — the workload cluster's own pre-existing platform stack (GitOps controllers,
+CNI, storage) is left alone.
+
+- **Management cluster:** `sre-control` — in our case a real 3-node kubeadm cluster
+  (control-plane `sre-control` + 2 workers), already running Cluster API, Flux, ArgoCD,
+  cert-manager, MetalLB, Longhorn, Gitea, etc. as its own platform stack. SREGym itself runs here
+  as a **host process** (not a Kubernetes workload) on the control-plane node, driven via `uv run
+  python main.py`.
+- **Workload/target cluster(s):** e.g. `sre-test1` — Kubernetes v1.32.8 (CAPI-provisioned), 1
+  control-plane + 2 workers, with its own pre-existing platform stack: **Longhorn (default
+  StorageClass), ArgoCD, Flux, MetalLB, flannel**. This is where faults get injected and the
+  benchmark application gets deployed each run.
+- **Which cluster SREGym targets is purely a matter of which kubeconfig is active** — see
+  Section 3 below. `~/.kube/config` on the runner host must point at the *workload* cluster
+  currently under test; a separate, dedicated kubeconfig (e.g. `~/mgmt.kubeconfig`, a copy of
+  `/etc/kubernetes/admin.conf`) is used for anything that needs to talk to the *management*
+  cluster instead (Helm releases, KAgent, etc.) so the two never collide. Adding another workload
+  cluster later means: bring up the cluster, drop its admin kubeconfig somewhere on the runner,
+  and point `~/.kube/config` at it before a run — no other SREGym config changes needed.
+- Node name → IP mapping (`sre-test1`):
+  | K8s node name | IP |
+  |---|---|
+  | `sre-test1-control-plane-x77z8` | 192.168.28.184 |
+  | `sre-test1-md-0-n2wps-fwjk8` | 192.168.28.202 |
+  | `sre-test1-md-0-n2wps-zxtrt` | 192.168.28.191 |
+- Credentials on the runner: `~/sre-test1.kubeconfig` (admin kubeconfig for the workload
+  cluster), `~/mgmt.kubeconfig` (admin kubeconfig for the management cluster, copied from
+  `/etc/kubernetes/admin.conf`), `~/workflow-prj.pem` (RSA-2048 SSH key for all workload-cluster
+  nodes, user `ubuntu`, passwordless sudo).
 
 ---
 
