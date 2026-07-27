@@ -120,6 +120,22 @@ class LiteLLMBackend:
                     prompt_messages = new_prompt_messages
                 completion = llm.invoke(input=prompt_messages)
                 return completion
+            except litellm.exceptions.ContentPolicyViolationError as e:
+                # Subclass of openai.BadRequestError - must be caught first or the
+                # generic branch below swallows it and re-raises without retrying.
+                # SRE fault-injection prompts often describe attack-like techniques
+                # (DNS poisoning, RBAC exploits, resource exhaustion) that can trip
+                # the provider's content classifier as a false positive; a retry
+                # frequently succeeds since the classifier isn't fully deterministic.
+                logger.warning(
+                    f"Content policy violation (likely a false positive on fault-injection "
+                    f"content). Retrying in {retry_delay}s... (Attempt {attempt + 1}/{LLM_QUERY_MAX_RETRIES})"
+                )
+                time.sleep(retry_delay)
+                retry_delay *= 2
+                if attempt == LLM_QUERY_MAX_RETRIES - 1:
+                    logger.error(f"Max retries exceeded due to repeated content policy violation: {e}")
+                    raise
             except openai.BadRequestError as e:
                 logger.error(f"Bad request error - request is malformed: {e}")
                 logger.error(f"Error details: {_safe_response_details(e)}")

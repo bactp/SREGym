@@ -115,6 +115,8 @@ spec:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
           effect: "NoSchedule"
+        - key: "node.cloudprovider.kubernetes.io/uninitialized"
+          operator: "Exists"
       containers:
         - name: otel-collector
           image: otel/opentelemetry-collector-contrib:0.104.0

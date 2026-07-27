@@ -379,6 +379,8 @@ server:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
+    - key: "node.cloudprovider.kubernetes.io/uninitialized"
+      operator: "Exists"
 
   ## Node labels for Prometheus server pod assignment
   ## Ref: https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/
@@ -1322,6 +1324,8 @@ alertmanager:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
+    - key: "node.cloudprovider.kubernetes.io/uninitialized"
+      operator: "Exists"
 
   podSecurityContext:
     runAsUser: 65534
@@ -1344,6 +1348,8 @@ kube-state-metrics:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
+    - key: "node.cloudprovider.kubernetes.io/uninitialized"
+      operator: "Exists"
 
 ## prometheus-node-exporter sub-chart configurable values
 ## Please see https://github.com/prometheus-community/helm-charts/tree/main/charts/prometheus-node-exporter
@@ -1374,6 +1380,8 @@ prometheus-pushgateway:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
+    - key: "node.cloudprovider.kubernetes.io/uninitialized"
+      operator: "Exists"
 
   # Optional service annotations
   serviceAnnotations:
@@ -1389,6 +1397,8 @@ prometheus-blackbox-exporter:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
+    - key: "node.cloudprovider.kubernetes.io/uninitialized"
+      operator: "Exists"
 
   config:
     modules:

@@ -802,10 +802,23 @@ class Conductor:
         self.logger.info("[DEPLOY] Setting up OpenEBS…")
         self._preflight_openebs_udev_mount()
         self.kubectl.exec_command("kubectl apply -f https://openebs.github.io/charts/openebs-operator.yaml")
-        self.kubectl.exec_command(
-            "kubectl patch storageclass openebs-hostpath "
-            '-p \'{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}\''
+        # Only promote openebs-hostpath to default when the cluster has no default
+        # StorageClass yet — sre-test1 already uses Longhorn as its default and
+        # platform workloads (ArgoCD/Flux-managed) depend on it staying default.
+        existing_default = self.kubectl.exec_command(
+            "kubectl get storageclass -o jsonpath="
+            '\'{range .items[?(@.metadata.annotations.storageclass\\.kubernetes\\.io/is-default-class=="true")]}{.metadata.name}{"\\n"}{end}\''
         )
+        if not (existing_default or "").strip():
+            self.kubectl.exec_command(
+                "kubectl patch storageclass openebs-hostpath "
+                '-p \'{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}\''
+            )
+        else:
+            self.logger.info(
+                f"[DEPLOY] Existing default StorageClass detected ({existing_default.strip()}); "
+                "leaving it as default and skipping openebs-hostpath default patch."
+            )
         self.kubectl.wait_for_ready("openebs")
         self._ensure_openebs_device_storageclass()
 

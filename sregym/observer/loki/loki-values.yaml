@@ -46,6 +46,8 @@ singleBinary:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
+    - key: "node.cloudprovider.kubernetes.io/uninitialized"
+      operator: "Exists"
   persistence:
     enabled: true
     storageClass: openebs-hostpath
@@ -69,6 +71,8 @@ gateway:
     - key: "node-role.kubernetes.io/control-plane"
       operator: "Exists"
       effect: "NoSchedule"
+    - key: "node.cloudprovider.kubernetes.io/uninitialized"
+      operator: "Exists"
 
 # Enable Promtail for log collection
 promtail:

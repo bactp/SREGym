@@ -20,3 +20,4 @@ tiktoken>=0.8.0
 nest-asyncio==1.6.0
 fastmcp>=2.9.2
 mcp[cli]>=1.9.1
+fastapi==0.115.12
