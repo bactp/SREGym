@@ -11,6 +11,7 @@ from sregym.generators.fault.inject_virtual import VirtualizationFaultInjector
 from sregym.generators.workload.blueprint_hotel_work import BHotelWrk, BHotelWrkWorkloadManager
 from sregym.service.apps.blueprint_hotel_reservation import BlueprintHotelReservation
 from sregym.service.kubectl import KubeCtl
+from sregym.service.target_cluster import resolve_target_kubeconfig
 from sregym.utils.decorators import mark_fault_injected
 
 MAX_WORKLOAD_REPLICAS = 8
@@ -84,7 +85,7 @@ class LoadSpikeRPCRetryStorm(Problem):
 
     def _configure_single_spike(self):
         """Patch wlgen ConfigMap so the spike is a one-shot trigger followed by long base traffic."""
-        config.load_kube_config()
+        config.load_kube_config(config_file=resolve_target_kubeconfig())
         client.CoreV1Api().patch_namespaced_config_map(
             name="bhotelwrk-wlgen-env",
             namespace=self.namespace,
@@ -101,7 +102,7 @@ class LoadSpikeRPCRetryStorm(Problem):
         print(f"[Config] Wlgen set for single spike: 60s warm-up → 30s spike → {_REVERT_SECONDS}s base traffic")
 
     def _scale_workload_deployment(self, replicas: int):
-        config.load_kube_config()
+        config.load_kube_config(config_file=resolve_target_kubeconfig())
         apps_v1 = client.AppsV1Api()
         apps_v1.patch_namespaced_deployment(
             name="bhotelwrk-wlgen",

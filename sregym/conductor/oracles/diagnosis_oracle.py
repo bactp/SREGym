@@ -6,6 +6,7 @@ from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
 from sregym.conductor.oracles.base import Oracle
+from sregym.service.target_cluster import resolve_target_kubeconfig
 
 logger = getLogger("all.sregym.diagnosis_oracle")
 logger.propagate = True
@@ -61,7 +62,7 @@ class DiagnosisOracle(Oracle):
             try:
                 config.load_incluster_config()
             except ConfigException:
-                config.load_kube_config()
+                config.load_kube_config(config_file=resolve_target_kubeconfig())
             if resource_type.lower() == "pod":
                 api = client.CoreV1Api()
                 obj = api.read_namespaced_pod(resource_name, namespace)
@@ -339,7 +340,7 @@ class DiagnosisOracle(Oracle):
             try:
                 config.load_incluster_config()
             except ConfigException:
-                config.load_kube_config()
+                config.load_kube_config(config_file=resolve_target_kubeconfig())
         except Exception as e:
             raise RuntimeError(f"Failed to load kube config: {e}") from e
 
@@ -465,7 +466,7 @@ class DiagnosisOracle(Oracle):
             try:
                 config.load_incluster_config()
             except ConfigException:
-                config.load_kube_config()
+                config.load_kube_config(config_file=resolve_target_kubeconfig())
         except Exception as e:
             raise RuntimeError(f"Failed to load kube config: {e}") from e
 

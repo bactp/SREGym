@@ -7,6 +7,7 @@ from sregym.generators.fault.inject_virtual import VirtualizationFaultInjector
 from sregym.generators.workload.blueprint_hotel_work import BHotelWrk, BHotelWrkWorkloadManager
 from sregym.service.apps.blueprint_hotel_reservation import BlueprintHotelReservation
 from sregym.service.kubectl import KubeCtl
+from sregym.service.target_cluster import resolve_target_kubeconfig
 from sregym.utils.decorators import mark_fault_injected
 
 
@@ -29,7 +30,7 @@ class GCCapacityDegradation(Problem):
         self.mitigation_oracle = AlertOracle(problem=self, exclude_alerts=["HighRequestRate"])
 
     def _apply_memory_limit(self):
-        config.load_kube_config()
+        config.load_kube_config(config_file=resolve_target_kubeconfig())
         core_v1 = client.CoreV1Api()
         limit_range_body = client.V1LimitRange(
             metadata=client.V1ObjectMeta(name="gc-memory-guard"),
@@ -53,7 +54,7 @@ class GCCapacityDegradation(Problem):
         print(f"[Memory Guard] LimitRange applied: 512Mi memory + 500m CPU max per container in {self.namespace}")
 
     def _remove_memory_limit(self):
-        config.load_kube_config()
+        config.load_kube_config(config_file=resolve_target_kubeconfig())
         core_v1 = client.CoreV1Api()
         try:
             core_v1.delete_namespaced_limit_range("gc-memory-guard", self.namespace)

@@ -22,6 +22,7 @@ from kubernetes.client import api_client  # noqa: E402
 from kubernetes.client.rest import ApiException  # noqa: E402
 
 from logger import console  # noqa: E402
+from sregym.service.target_cluster import resolve_target_kubeconfig  # noqa: E402
 
 WAIT_FOR_POD_READY_TIMEOUT = int(os.getenv("WAIT_FOR_POD_READY_TIMEOUT", "600"))
 
@@ -30,7 +31,7 @@ class KubeCtl:
     def __init__(self):
         """Initialize the KubeCtl object and load the Kubernetes configuration."""
         try:
-            config.load_kube_config()
+            config.load_kube_config(config_file=resolve_target_kubeconfig())
         except Exception:
             logger.error("Missing kubeconfig. Please set up a cluster.")
             exit(1)

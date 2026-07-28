@@ -15,6 +15,7 @@ from kubernetes import config
 from pydantic.dataclasses import dataclass
 
 from mcp_server.kubectl_server_helper.utils import parse_text
+from sregym.service.target_cluster import resolve_target_kubeconfig
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ class KubeCtl:
         try:
             config.load_incluster_config()
         except config.ConfigException:
-            config.load_kube_config()
+            config.load_kube_config(config_file=resolve_target_kubeconfig())
         # self.core_v1_api = client.CoreV1Api()
         # self.apps_v1_api = client.AppsV1Api()
 

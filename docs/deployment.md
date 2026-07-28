@@ -26,13 +26,17 @@ CNI, storage) is left alone.
   control-plane + 2 workers, with its own pre-existing platform stack: **Longhorn (default
   StorageClass), ArgoCD, Flux, MetalLB, flannel**. This is where faults get injected and the
   benchmark application gets deployed each run.
-- **Which cluster SREGym targets is purely a matter of which kubeconfig is active** — see
-  Section 3 below. `~/.kube/config` on the runner host must point at the *workload* cluster
-  currently under test; a separate, dedicated kubeconfig (e.g. `~/mgmt.kubeconfig`, a copy of
-  `/etc/kubernetes/admin.conf`) is used for anything that needs to talk to the *management*
-  cluster instead (Helm releases, KAgent, etc.) so the two never collide. Adding another workload
-  cluster later means: bring up the cluster, drop its admin kubeconfig somewhere on the runner,
-  and point `~/.kube/config` at it before a run — no other SREGym config changes needed.
+- **Which cluster SREGym targets is purely a matter of `$KUBECONFIG`/`--target-kubeconfig`** — see
+  Section 3 below. `~/.kube/config` on the runner host is **reserved for this host's own default
+  cluster (the management cluster)** and must never be overwritten with a workload cluster's
+  kubeconfig — SREGym never reads it as a fallback, by design (see Section 3). A separate,
+  dedicated kubeconfig (e.g. `~/mgmt.kubeconfig`, a copy of `/etc/kubernetes/admin.conf`) is used
+  for anything that needs to talk to the *management* cluster from SREGym-adjacent tooling
+  (KAgent, etc.). Adding another workload cluster later means: bring up the cluster, drop its
+  admin kubeconfig somewhere on the runner (e.g. `~/clusters/<name>.kubeconfig`), and pass
+  `--target-kubeconfig ~/clusters/<name>.kubeconfig` (or export `KUBECONFIG` to that path) for
+  that run — no other SREGym config changes needed, and no risk of clobbering another cluster's
+  kubeconfig.
 - Node name → IP mapping (`sre-test1`):
   | K8s node name | IP |
   |---|---|
@@ -94,27 +98,35 @@ uv run python main.py --help    # smoke test
 
 ## 3. Kubeconfig placement
 
-**`KubernetesAPIProxy` now honors `$KUBECONFIG`** (fixed 2026-07-27, `sregym/service/k8s_proxy.py:
-_resolve_kubeconfig_path()`) — it used to always load `~/.kube/config` regardless of the
-environment, which was a common source of confusion. If `$KUBECONFIG` is unset, it still falls
-back to `~/.kube/config`, so the simplest setup remains the same:
+**SREGym requires an explicit target-cluster kubeconfig — it never falls back to
+`~/.kube/config`** (fixed 2026-07-28, `sregym/service/target_cluster.py:resolve_target_kubeconfig()`,
+used by every call site that used to hardcode `config.load_kube_config()` with no arguments —
+those silently ignored `$KUBECONFIG` before this fix). `~/.kube/config` on this host is reserved
+for the management cluster's own default and is never touched by SREGym.
+
+Point SREGym at a workload cluster one of two ways — either works, pick whichever fits your
+workflow:
 
 ```bash
-mkdir -p ~/.kube
-cp ~/sre-test1.kubeconfig ~/.kube/config
-chmod 600 ~/.kube/config
-kubectl config current-context     # must show the TARGET (workload) cluster
+# Option A: pass it on the command line every run
+uv run python main.py --target-kubeconfig ~/sre-test1.kubeconfig --agent stratus --problem ...
+
+# Option B: export it once per shell session
+export KUBECONFIG=~/sre-test1.kubeconfig
+uv run python main.py --agent stratus --problem ...
 ```
 
-If you'd rather not touch `~/.kube/config` (e.g. it's already used for something else, or you
-juggle multiple target clusters), export `KUBECONFIG=~/sre-test1.kubeconfig` in the shell that
-launches `main.py` instead — SREGym will use that.
+`main.py` fails fast with a clear error at startup if neither is set, or if the path doesn't
+exist — it will not silently run against whatever `~/.kube/config` happens to contain.
 
-> Everything SREGym deploys/injects goes to whatever kubeconfig is active (`$KUBECONFIG` if set,
-> else `~/.kube/config`). Double-check this before every run if you work with multiple clusters.
-> Note: a few oracle-evaluation code paths (`clients/stratus/weak_oracles/{workload_oracle,
-> cluster_state_oracle}.py`) *intentionally* bypass this and read the real cluster directly — they
-> need the unfiltered ground truth, not the agent-facing filtered view. That's by design, not a bug.
+> Everything SREGym deploys/injects goes to whichever kubeconfig was resolved above. If you juggle
+> multiple workload clusters, keep one kubeconfig file per cluster (e.g. `~/clusters/sre-test1.kubeconfig`,
+> `~/clusters/sre-test2.kubeconfig`) and pick the right one per run — never overwrite one cluster's
+> file with another's. Note: a few oracle-evaluation code paths
+> (`clients/stratus/weak_oracles/{workload_oracle,cluster_state_oracle}.py`) *intentionally* bypass
+> the agent-facing filtering proxy and read the real target cluster directly (still via the same
+> resolved kubeconfig, just without the namespace/label filtering) — they need the unfiltered
+> ground truth. That's by design, not a bug.
 
 ## 4. SSH setup for OS-level fault injection
 
@@ -375,7 +387,8 @@ results/traces.db                            # SQLite ingest of all trajectories
 | Symptom | Cause | Fix |
 |---|---|---|
 | `preflight failed: No module named 'fastapi'` | container requirements miss fastapi (upstream bug) | Patch 1 + `--force-build` |
-| `Invalid kube-config file. No configuration found.` at startup | neither `$KUBECONFIG` nor `~/.kube/config` points at a valid kubeconfig | Section 3 |
+| `main.py: error: No target workload-cluster kubeconfig configured` at startup | neither `--target-kubeconfig` nor `$KUBECONFIG` was set | Section 3 |
+| `main.py: error: --target-kubeconfig/$KUBECONFIG points at a file that doesn't exist` | path typo, or a stale/removed kubeconfig file | Section 3 |
 | `❌ Judge pre-flight check failed` / process exits immediately | `OPENAI_API_KEY` (or equivalent) not present in *this specific* shell's environment | Section 7 — use `--env-file`, or `--skip-judge-preflight` if you're confident it's fine |
 | `observe` pods Pending: `untolerated taint {node.cloudprovider.kubernetes.io/uninitialized}` | stale CAPI taint, no CCM to clear it | Section 5.1 (+ Patches 3–4) |
 | Alertmanager stuck ContainerCreating: `CSINode ... does not contain driver driver.longhorn.io` | Longhorn CSI never scheduled on control-plane (taint) | untaint, wait for Longhorn DaemonSets to spread |

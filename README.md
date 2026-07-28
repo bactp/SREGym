@@ -100,7 +100,14 @@ export AWS_PROFILE="bedrock"
 export AWS_DEFAULT_REGION="us-east-2"
 ```
 
-2. Run the benchmark:
+2. Point SREGym at the workload/target cluster (required — either flag works, no fallback to
+   `~/.kube/config`):
+```bash
+export KUBECONFIG=~/path/to/target-cluster.kubeconfig
+# or pass --target-kubeconfig <path> on every invocation instead
+```
+
+3. Run the benchmark:
 ```bash
 python main.py --agent stratus --model gpt-5
 ```

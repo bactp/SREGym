@@ -14,6 +14,7 @@ from sregym.conductor.problems.base import Problem
 from sregym.generators.fault.inject_virtual import VirtualizationFaultInjector
 from sregym.service.apps.hotel_reservation import HotelReservation
 from sregym.service.kubectl import KubeCtl
+from sregym.service.target_cluster import resolve_target_kubeconfig
 from sregym.utils.decorators import mark_fault_injected
 
 
@@ -46,7 +47,7 @@ class FileDescriptorExhaustion(Problem):
 
     def background_flooder(self):
         print("\n[Flooder] Starting flooder background thread...")
-        config.load_kube_config()
+        config.load_kube_config(config_file=resolve_target_kubeconfig())
         v1 = client.CoreV1Api()
 
         current_pod = None

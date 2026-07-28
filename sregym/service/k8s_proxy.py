@@ -28,6 +28,8 @@ from urllib.parse import urlparse
 import urllib3
 from kubernetes import config
 
+from sregym.service.target_cluster import resolve_target_kubeconfig
+
 logger = logging.getLogger("all.infra.k8s_proxy")
 logger.propagate = True
 logger.setLevel(logging.DEBUG)
@@ -50,14 +52,15 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 def _resolve_kubeconfig_path() -> str:
     """Resolve the kubeconfig this proxy should read from.
 
-    Honors $KUBECONFIG if set, falling back to ~/.kube/config. This is resolved once, at
-    proxy-construction time, never re-read afterward - safe because neither real call site
-    mutates $KUBECONFIG before this resolves: the host conductor process never touches its own
-    $KUBECONFIG at all, and the in-cluster mcp-server pod (the only place that *does* repoint
+    Delegates to resolve_target_kubeconfig() ($KUBECONFIG, no ~/.kube/config fallback).
+    This is resolved once, at proxy-construction time, never re-read afterward - safe
+    because neither real call site mutates $KUBECONFIG before this resolves: the host
+    conductor process sets it once at startup (see main.py --target-kubeconfig) and never
+    touches it again, and the in-cluster mcp-server pod (the only place that *does* repoint
     $KUBECONFIG to this proxy's own generated config) does so only after already using
     ServiceAccount credentials, never reaching this kubeconfig-loading branch in the first place.
     """
-    return os.environ.get("KUBECONFIG") or os.path.expanduser("~/.kube/config")
+    return resolve_target_kubeconfig()
 
 
 class KubernetesAPIProxy:

@@ -12,6 +12,7 @@ from logger import console
 from sregym.generators.workload.base import WorkloadEntry
 from sregym.generators.workload.stream import STREAM_WORKLOAD_EPS, StreamWorkloadManager
 from sregym.paths import BASE_DIR
+from sregym.service.target_cluster import resolve_target_kubeconfig
 
 logger = logging.getLogger("all.infra.workload")
 logger.propagate = True
@@ -32,7 +33,7 @@ class Wrk2:
         self.latency = latency
         self.namespace = namespace
 
-        config.load_kube_config()
+        config.load_kube_config(config_file=resolve_target_kubeconfig())
 
     def create_configmap(self, name, namespace, payload_script_path, url):
         with open(payload_script_path) as script_file:
@@ -193,7 +194,7 @@ class Wrk2WorkloadManager(StreamWorkloadManager):
         self.job_name = job_name
         self.namespace = namespace
 
-        config.load_kube_config()
+        config.load_kube_config(config_file=resolve_target_kubeconfig())
         self.core_v1_api = client.CoreV1Api()
         self.batch_v1_api = client.BatchV1Api()
 

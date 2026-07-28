@@ -13,6 +13,7 @@ from clients.stratus.weak_oracles.base_oracle import BaseOracle, OracleResult
 from sregym.paths import BASE_DIR, TARGET_MICROSERVICES
 from sregym.service.apps.base import Application
 from sregym.service.kubectl import KubeCtl
+from sregym.service.target_cluster import resolve_target_kubeconfig
 
 logger = logging.getLogger("all.stratus.workload_oracle")
 
@@ -25,7 +26,8 @@ def _make_real_api_client() -> client.ApiClient:
     mirrors the approach used by KubernetesAPIProxy itself and by the Resolve driver.
 
     Inside containers, the real kubeconfig is mounted at a separate path and
-    advertised via SREGYM_REAL_KUBECONFIG. On the host, ~/.kube/config is used.
+    advertised via SREGYM_REAL_KUBECONFIG. On the host, the resolved target-cluster
+    kubeconfig is used (there is no filtering proxy at the host-process level).
     """
     try:
         config.load_incluster_config()
@@ -34,10 +36,7 @@ def _make_real_api_client() -> client.ApiClient:
         # Running outside the cluster — load from the real kubeconfig path,
         # ignoring the KUBECONFIG env var which may point to the filtering proxy.
         # In containers, SREGYM_REAL_KUBECONFIG points to the unproxied config.
-        real_kubeconfig = os.environ.get(
-            "SREGYM_REAL_KUBECONFIG",
-            os.path.expanduser("~/.kube/config"),
-        )
+        real_kubeconfig = os.environ.get("SREGYM_REAL_KUBECONFIG") or resolve_target_kubeconfig()
         cfg = client.Configuration()
         config.load_kube_config(config_file=real_kubeconfig, client_configuration=cfg)
         return client.ApiClient(configuration=cfg)

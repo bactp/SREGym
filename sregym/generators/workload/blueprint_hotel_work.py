@@ -10,6 +10,7 @@ from sregym.generators.noise.impl.stress_injector import ChaosInjector
 from sregym.generators.workload.base import WorkloadEntry
 from sregym.generators.workload.stream import StreamWorkloadManager
 from sregym.paths import TARGET_MICROSERVICES
+from sregym.service.target_cluster import resolve_target_kubeconfig
 
 # Mimicked the Wrk2 class
 
@@ -28,7 +29,7 @@ class BHotelWrk:
         self.duration = duration
         self.multiplier = multiplier
 
-        config.load_kube_config()
+        config.load_kube_config(config_file=resolve_target_kubeconfig())
 
     def create_configmap(self, config_name, namespace):
         api_instance = client.CoreV1Api()
@@ -188,7 +189,7 @@ class BHotelWrkWorkloadManager(StreamWorkloadManager):
         self.continuous = continuous
         self.deployment_name = deployment_name
         self.apply_capacity_restraint = apply_capacity_restraint
-        config.load_kube_config()
+        config.load_kube_config(config_file=resolve_target_kubeconfig())
         self.core_v1_api = client.CoreV1Api()
         self.batch_v1_api = client.BatchV1Api()
 

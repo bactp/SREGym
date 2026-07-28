@@ -764,6 +764,15 @@ if __name__ == "__main__":
         "(default: .env in the current directory, silently skipped if it doesn't exist).",
     )
     parser.add_argument(
+        "--target-kubeconfig",
+        type=str,
+        default=None,
+        help="Path to the kubeconfig of the workload/target cluster this run should "
+        "fault-inject/benchmark against (e.g. ~/clusters/sre-test1.kubeconfig). Required "
+        "unless $KUBECONFIG is already exported in this shell. SREGym never falls back to "
+        "~/.kube/config, which is reserved for this host's own default cluster.",
+    )
+    parser.add_argument(
         "--skip-judge-preflight",
         action="store_true",
         help="Skip the judge model pre-flight sanity check. Useful when the judge credential isn't "
@@ -779,6 +788,23 @@ if __name__ == "__main__":
     if os.path.isfile(args.env_file):
         load_dotenv(args.env_file)
         print(f"🔧 Loaded environment from {args.env_file}")
+
+    # Resolve the workload/target cluster before anything touches Kubernetes. Fail fast
+    # rather than silently falling back to ~/.kube/config (this host's own default cluster).
+    if args.target_kubeconfig:
+        os.environ["KUBECONFIG"] = os.path.expanduser(args.target_kubeconfig)
+
+    from sregym.service.target_cluster import TargetClusterNotConfiguredError, resolve_target_kubeconfig
+
+    try:
+        target_kubeconfig_path = resolve_target_kubeconfig()
+    except TargetClusterNotConfiguredError as e:
+        parser.error(str(e))
+
+    if not os.path.isfile(target_kubeconfig_path):
+        parser.error(f"--target-kubeconfig/$KUBECONFIG points at a file that doesn't exist: {target_kubeconfig_path}")
+
+    print(f"🎯 Target workload cluster kubeconfig: {target_kubeconfig_path}")
 
     # Validate that n_attempts is positive
     if args.n_attempts is not None and args.n_attempts < 1:
