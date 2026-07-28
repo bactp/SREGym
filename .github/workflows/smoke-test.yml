@@ -55,6 +55,13 @@ jobs:
       - name: Create kind cluster with Calico
         run: bash kind/setup_kind_cluster.sh x86
 
+      # `kind create cluster` (no --kubeconfig flag) writes to ~/.kube/config.
+      # SREGym now requires $KUBECONFIG to be set explicitly and never falls
+      # back to ~/.kube/config (sregym/service/target_cluster.py) — point it
+      # at the same file kind already populated.
+      - name: Export target kubeconfig for SREGym
+        run: echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
       # ── Python environment ────────────────────────────────────────────
       - name: Install uv
         uses: astral-sh/setup-uv@v4
