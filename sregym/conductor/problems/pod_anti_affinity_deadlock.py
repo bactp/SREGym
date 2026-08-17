@@ -53,6 +53,32 @@ class PodAntiAffinityDeadlock(Problem):
         print("  '0/X nodes are available: X node(s) didn't match pod anti-affinity rules'")
         print(f"Service: {self.faulty_service} | Namespace: {self.namespace}\n")
 
+    def confirm_fault_active(self, timeout: float = 60.0) -> bool:
+        """Fault-specific: this is a scheduling deadlock (strict anti-affinity vs
+        insufficient eligible nodes) - confirm by checking that a faulty_service pod
+        is genuinely stuck Pending with a PodScheduled=False condition mentioning
+        anti-affinity, not just Pending phase alone (which could also be an
+        unrelated, transient scheduling delay). The existing time.sleep(30) inside
+        inject_fault() above is a blind wait, not a confirmation - this check is
+        additive, run after it, and is the real signal the conductor now waits on."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            pods = self.kubectl.core_v1_api.list_namespaced_pod(
+                self.namespace, label_selector=f"service={self.faulty_service}"
+            ).items
+            for pod in pods:
+                if pod.status.phase != "Pending":
+                    continue
+                for cond in pod.status.conditions or []:
+                    if (
+                        cond.type == "PodScheduled"
+                        and cond.status == "False"
+                        and "anti-affinity" in (cond.message or "").lower()
+                    ):
+                        return True
+            time.sleep(3)
+        return False
+
     @mark_fault_injected
     def recover_fault(self):
         print("== Fault Recovery ==")

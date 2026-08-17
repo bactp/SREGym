@@ -19,6 +19,7 @@ ENV PATH="/root/.local/bin:$PATH"
 COPY pyproject.toml uv.lock ./
 COPY mcp_server/ ./mcp_server/
 COPY sregym/ ./sregym/
+COPY atif_converter/ ./atif_converter/
 COPY clients/ ./clients/
 COPY scripts/ ./scripts/
 COPY llm_backend/ ./llm_backend/

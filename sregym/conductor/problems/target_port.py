@@ -1,5 +1,7 @@
 """K8S misconfig fault problem in the SocialNetwork application."""
 
+import time
+
 from sregym.conductor.oracles.llm_as_a_judge.llm_as_a_judge_oracle import LLMAsAJudgeOracle
 from sregym.conductor.oracles.target_port_mitigation import TargetPortMisconfigMitigationOracle
 from sregym.conductor.problems.base import Problem
@@ -46,3 +48,19 @@ class K8STargetPortMisconfig(Problem):
             microservices=[self.faulty_service],
         )
         print(f"[FAULT RECOVERED] {self.faulty_service}")
+
+    def confirm_fault_active(self, timeout: float = 30.0) -> bool:
+        """Fault-specific: this fault is a single atomic Service.spec.ports[].targetPort
+        patch (9090 -> 9999) - no pod restart/lifecycle involved at all, unlike faults
+        that recreate pods. Confirm by reading the Service back and checking the
+        misconfigured targetPort actually landed, rather than trusting the patch
+        call's own return alone. Short timeout is enough - there's no pod churn to
+        wait through, just API-server/etcd write propagation."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            svc = self.kubectl.get_service(self.faulty_service, self.namespace)
+            target_ports = {p.target_port for p in (svc.spec.ports or [])}
+            if 9999 in target_ports:
+                return True
+            time.sleep(2)
+        return False

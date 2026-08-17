@@ -223,6 +223,18 @@ class Conductor:
         self.logger.info("[ENV] Injected fault")
         self.fault_injected = True
 
+        # inject_fault() only confirms the injection call happened (e.g. a webhook was
+        # created, a pod was deleted) - not that the fault's actual symptom is observable
+        # yet. Block here (generic default in Problem.confirm_fault_active, override-able
+        # per-problem) until the namespace has settled past its post-injection churn, so
+        # the agent isn't invoked mid-transition. Placed before execution_start_time's
+        # reset below (in start_problem()), so this wait is excluded from TTL - same
+        # "measure agent time only" intent that reset already existed for.
+        stabilized = problem.confirm_fault_active()
+        self.logger.info(
+            f"[ENV] Fault-active confirmation {'settled' if stabilized else 'timed out - proceeding anyway'}"
+        )
+
         # Prepare diagnosis checkpoint if available, after fault injection but before agent stages
         if (
             hasattr(problem, "diagnosis_oracle")
@@ -445,8 +457,17 @@ class Conductor:
             except Exception as e:
                 self.logger.warning(f"Failed to update NoiseManager context: {e}")
 
-        # After deployment, advance to the first stage
-        self._advance_to_next_stage(start_index=0)
+        # After deployment, advance to the first stage. This synchronously runs
+        # _inject_fault() -> problem.confirm_fault_active() (and some problems'
+        # inject_fault() itself, e.g. pod_anti_affinity_deadlock's own time.sleep(30))
+        # - real blocking calls, up to ~90s. Offload to a worker thread via
+        # asyncio.to_thread rather than calling directly: this coroutine runs on
+        # start_problem()'s own event loop, and a long synchronous call here would
+        # otherwise hold that loop (and, via CPython's GIL, degrade responsiveness
+        # of anything else running concurrently in this process) for the whole
+        # duration - the same class of issue already solved once in this codebase
+        # for submit()'s evaluation path (see its ThreadPoolExecutor usage below).
+        await asyncio.to_thread(self._advance_to_next_stage, start_index=0)
 
         self.execution_start_time = time.time()  # Reset: measure agent time only
 

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastmcp import Context, FastMCP
@@ -52,7 +53,7 @@ def get_tools(session_id: str) -> KubectlToolSet:
 
 
 @kubectl_mcp.tool()
-def exec_kubectl_cmd_safely(cmd: str, ctx: Context) -> str:
+async def exec_kubectl_cmd_safely(cmd: str, ctx: Context) -> str:
     """
     Use this function to execute kubectl commands.
     Args:
@@ -65,14 +66,18 @@ def exec_kubectl_cmd_safely(cmd: str, ctx: Context) -> str:
     kubctl_tool = get_tools(ssid)
     logger.debug(f'session {ssid} is using tool "exec_kubectl_cmd_safely"; Command: {cmd}.')
 
-    result = kubctl_tool.cmd_runner.exec_kubectl_cmd_safely(cmd)
+    # cmd_runner blocks on subprocess.Popen().communicate() for the kubectl command's
+    # full duration (up to its configured timeout) - run it off the event loop so a
+    # single slow command (e.g. a rollout status wait) doesn't freeze every other
+    # session on this single-process server for as long as it runs.
+    result = await asyncio.to_thread(kubctl_tool.cmd_runner.exec_kubectl_cmd_safely, cmd)
     assert isinstance(result, str)
     logger.info(f"[ACTION_STACK] after exec ssid={ssid!r}: {kubctl_tool.action_stack}")
     return result
 
 
 @kubectl_mcp.tool()
-def rollback_command(ctx: Context) -> str:
+async def rollback_command(ctx: Context) -> str:
     """
     Use this function to roll back the last kubectl command
     you successfully executed with the "exec_kubectl_cmd_safely" tool.
@@ -83,7 +88,8 @@ def rollback_command(ctx: Context) -> str:
     ssid = extract_session_id(ctx)
     kubectl_tool = get_tools(ssid)
     logger.debug(f'session {ssid} is using tool "rollback_command".')
-    result = kubectl_tool.rollback_tool.rollback()
+    # Same blocking-subprocess concern as exec_kubectl_cmd_safely above.
+    result = await asyncio.to_thread(kubectl_tool.rollback_tool.rollback)
     assert isinstance(result, str)
     return f"{result}, action_stack: {kubectl_tool.rollback_tool.action_stack}"
 

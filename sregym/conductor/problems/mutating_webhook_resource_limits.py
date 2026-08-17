@@ -704,6 +704,37 @@ spec:
         )
         print(f"Service: {self.faulty_service} | Namespace: {self.namespace}\n")
 
+    def confirm_fault_active(self, timeout: float = 90.0) -> bool:
+        """Fault-specific override: wait until the replacement `faulty_service` pod
+        has actually been OOMKilled at least once - the real symptom this fault
+        causes - instead of the base class's generic "some pod somewhere is stable"
+        proxy. Directly targets what an agent needs to see to have any chance of
+        diagnosing this correctly: replacing a pod, then racing it before its
+        (unrelated, ~74s) init container even finishes was the mechanism verified
+        live (2026-08-06) behind repeated misdiagnoses blaming a "stuck" init
+        container instead of the webhook.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            pods = self.core_api.list_namespaced_pod(
+                namespace=self.namespace, label_selector=f"service={self.faulty_service}"
+            ).items
+            for pod in pods:
+                for cs in pod.status.container_statuses or []:
+                    last_state = cs.last_state
+                    if (
+                        cs.restart_count
+                        and last_state
+                        and last_state.terminated
+                        and last_state.terminated.reason == "OOMKilled"
+                    ):
+                        return True
+                    waiting = cs.state.waiting if cs.state else None
+                    if waiting and waiting.reason == "CrashLoopBackOff":
+                        return True
+            time.sleep(5)
+        return False
+
     @mark_fault_injected
     def recover_fault(self):
         print("== Fault Recovery ==")

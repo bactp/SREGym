@@ -120,6 +120,77 @@ Follow the DIAGNOSIS then MITIGATION workflow and submission rules from your sys
 Work autonomously from here - do not ask for confirmation."""
 
 
+def _reconstruct_history_from_stream(stdout: str) -> dict | None:
+    """Reassemble a non-streaming-shaped ``{"history": [...]}`` result from ``--stream``
+    NDJSON output, so the existing ATIF adapter (``atif_converter/adapters/kagent.py``,
+    which expects the single-shot ``kagent invoke`` response shape) can still convert it
+    and populate ``Metrics.*``.
+
+    Each NDJSON line is one event. A ``status-update`` event's ``status.message`` is one
+    A2A history item (``role``/``parts``/``metadata`` incl. per-turn
+    ``kagent_usage_metadata``) - the same shape a non-streaming ``history[]`` entry has.
+    The message just before a terminal state is re-emitted verbatim in the final event too,
+    so dedupe by ``messageId`` (keep the first occurrence).
+
+    The agent's last turn is typically published *twice*: once as a normal message (with its
+    own usage) and again as an ``artifact-update`` carrying identical text with no usage of
+    its own, followed by a trailing usage-only ``status-update`` restating that same turn's
+    usage. Skip an ``artifact-update`` whose text matches the immediately preceding history
+    entry (the common case) rather than double-counting that turn; only keep it as a new
+    entry - and reattach the trailing usage-only event to it (FIFO) - when its text genuinely
+    doesn't match anything already recorded.
+    """
+    events = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+    context_id = None
+    history: list[dict] = []
+    seen_message_ids: set[str] = set()
+    pending_artifact_indices: list[int] = []
+
+    for event in events:
+        context_id = event.get("contextId", context_id)
+        kind = event.get("kind")
+
+        if kind == "status-update":
+            message = (event.get("status") or {}).get("message")
+            usage = (event.get("metadata") or {}).get("kagent_usage_metadata")
+            if message:
+                message_id = message.get("messageId")
+                if message_id and message_id in seen_message_ids:
+                    continue
+                if message_id:
+                    seen_message_ids.add(message_id)
+                history.append(message)
+            elif usage and pending_artifact_indices:
+                target = pending_artifact_indices.pop(0)
+                history[target].setdefault("metadata", {})["kagent_usage_metadata"] = usage
+        elif kind == "artifact-update":
+            parts = (event.get("artifact") or {}).get("parts") or []
+            if not parts:
+                continue
+            artifact_text = "".join(p.get("text", "") for p in parts if p.get("kind") == "text")
+            if history:
+                last_parts = history[-1].get("parts", [])
+                last_text = "".join(p.get("text", "") for p in last_parts if p.get("kind") == "text")
+                if artifact_text and artifact_text == last_text:
+                    continue  # redundant restatement of the turn just added above
+            history.append({"role": "agent", "parts": parts, "metadata": {}})
+            pending_artifact_indices.append(len(history) - 1)
+
+    if not history:
+        return None
+
+    return {"contextId": context_id, "history": history}
+
+
 def save_invocation_result(logs_dir: Path, problem_id: str, result: dict | str) -> Path:
     """Best-effort dump of the raw kagent invoke output, for parity with other clients' logs."""
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -157,6 +228,7 @@ def invoke_kagent(
         f"{timeout_seconds}s",
         "--output-format",
         "json",
+        "--stream",
     ]
     logger.info(f"Invoking kagent agent '{agent}' (timeout={timeout_seconds}s)...")
     result = subprocess.run(
@@ -224,11 +296,13 @@ def main():
     if returncode != 0:
         logger.warning(f"kagent invoke exited with code {returncode}. stderr: {stderr[:2000]}")
 
-    parsed_result = stdout
-    try:
-        parsed_result = json.loads(stdout)
-    except json.JSONDecodeError:
-        logger.warning("Could not parse kagent invoke output as JSON, saving raw text instead")
+    parsed_result = _reconstruct_history_from_stream(stdout)
+    if parsed_result is None:
+        try:
+            parsed_result = json.loads(stdout)
+        except json.JSONDecodeError:
+            logger.warning("Could not parse kagent invoke output as NDJSON stream or plain JSON, saving raw text instead")
+            parsed_result = stdout
 
     save_invocation_result(logs_dir, problem_id, parsed_result if isinstance(parsed_result, dict) else stdout)
 

@@ -62,7 +62,12 @@ agents:
     agent_version: null
     container_isolation: false
   - name: kagent
-    kickoff_command: python -m clients.kagent.driver
+    # --done-wait-timeout raised from the driver's 120s default - not just an Agent-as-tool
+    # overhead issue (see kagent-orchestrator's comment below): sre-agent hit the same
+    # "Timed out waiting for conductor to report done" failure on liveness_probe_too_aggressive_
+    # social_network attempt 2 (2026-08-03), losing its mitigation score entirely. The 120s
+    # default is simply too short for slower problems/models in general, single-agent or not.
+    kickoff_command: python -m clients.kagent.driver --done-wait-timeout 900
     kickoff_workdir: .
     kickoff_env:
       KAGENT_KUBECONFIG: /home/ubuntu/mgmt.kubeconfig
@@ -77,6 +82,50 @@ agents:
     kickoff_env:
       KAGENT_KUBECONFIG: /home/ubuntu/mgmt.kubeconfig
       KAGENT_AGENT_NAME: sre2
+      KAGENT_NAMESPACE: kagent
+    install_script: null
+    agent_version: null
+    container_isolation: false
+  - name: kagent-orchestrator
+    # --done-wait-timeout raised from the driver's 120s default: each Agent-as-tool hop adds
+    # real card-fetch/session overhead on top of actual work, observed taking >5min for a single
+    # remediation-agent call alone during matrix testing (2026-08-03) - the 120s default caused
+    # main.py to tear down the conductor's submit endpoint before the orchestrator's delayed
+    # final submit("") call could land ("MCP server may be unreachable").
+    kickoff_command: python -m clients.kagent.driver --done-wait-timeout 900
+    kickoff_workdir: .
+    kickoff_env:
+      KAGENT_KUBECONFIG: /home/ubuntu/mgmt.kubeconfig
+      KAGENT_AGENT_NAME: orchestrator
+      KAGENT_NAMESPACE: kagent
+    install_script: null
+    agent_version: null
+    container_isolation: false
+  - name: kagent-ctx-skill
+    # H3 experiment (2026-08-05): SA side of the Context+Skill enrichment comparison. Same
+    # sre-agent workflow/timeout profile as `kagent` above, pointed at sre-agent-ctx-skill
+    # (adds a live get_operational_context MCP tool + a statically-baked diagnostic pattern
+    # to the diagnosis task only). See agent-orchestrator/manifests/sre-agent-ctx-skill.yaml.
+    kickoff_command: python -m clients.kagent.driver --done-wait-timeout 900
+    kickoff_workdir: .
+    kickoff_env:
+      KAGENT_KUBECONFIG: /home/ubuntu/mgmt.kubeconfig
+      KAGENT_AGENT_NAME: sre-agent-ctx-skill
+      KAGENT_NAMESPACE: kagent
+    install_script: null
+    agent_version: null
+    container_isolation: false
+  - name: kagent-orchestrator-ctx-skill
+    # H3 experiment (2026-08-05): MA side. Same orchestrator workflow/timeout profile as
+    # `kagent-orchestrator` above, but its rca-agent tool ref is swapped for
+    # rca-agent-ctx-skill (same context+skill additions as the SA side, diagnose-only scope
+    # per this round's decision - remediation-agent/rca-agent-variant unchanged). See
+    # agent-orchestrator/manifests/orchestrator-ctx-skill.yaml.
+    kickoff_command: python -m clients.kagent.driver --done-wait-timeout 900
+    kickoff_workdir: .
+    kickoff_env:
+      KAGENT_KUBECONFIG: /home/ubuntu/mgmt.kubeconfig
+      KAGENT_AGENT_NAME: orchestrator-ctx-skill
       KAGENT_NAMESPACE: kagent
     install_script: null
     agent_version: null
