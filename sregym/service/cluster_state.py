@@ -20,7 +20,27 @@ logger.setLevel(logging.DEBUG)
 # is included so that noise injection survives the per-problem cleanup —
 # without it the conductor wipes the chaos-mesh helm release and CRDs after
 # every problem and the next noise injection silently fails.
-PROTECTED_NAMESPACES = frozenset({"kube-system", "kube-public", "kube-node-lease", "default", "sregym", "chaos-mesh"})
+#
+# argocd/flux-system/longhorn-system/metallb-system are included because on a
+# live, GitOps-managed cluster these platform namespaces can be created (or
+# have new child resources appear) *during* a problem run, independent of
+# SREGym — relying on them merely being present at baseline-capture time is
+# not enough, since a namespace baseline snapshot only protects what already
+# existed when it was taken, not one created afterward by the platform itself.
+PROTECTED_NAMESPACES = frozenset(
+    {
+        "kube-system",
+        "kube-public",
+        "kube-node-lease",
+        "default",
+        "sregym",
+        "chaos-mesh",
+        "argocd",
+        "flux-system",
+        "longhorn-system",
+        "metallb-system",
+    }
+)
 
 
 def _is_chaos_mesh_resource(name: str) -> bool:

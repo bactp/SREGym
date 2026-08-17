@@ -22,12 +22,27 @@ class IngressNginx:
         self.run_cmd("helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx 2>/dev/null || true")
         self.run_cmd("helm repo update ingress-nginx")
 
+        # Only claim the default IngressClass when the cluster has none yet —
+        # live clusters may already have a platform-managed default ingress
+        # controller that other workloads depend on staying default.
+        existing_default = self.run_cmd(
+            "kubectl get ingressclass -o jsonpath="
+            "'{range .items[?(@.metadata.annotations.ingressclass\\.kubernetes\\.io/is-default-class==\"true\")]}"
+            '{.metadata.name}{"\\n"}{end}\''
+        )
+        set_default = not existing_default.strip()
+        if not set_default:
+            logger.info(
+                f"Existing default IngressClass detected ({existing_default.strip()}); "
+                "leaving it as default and skipping ingress-nginx default flag."
+            )
+
         # Install or upgrade the chart
         self.run_cmd(
             f"helm upgrade --install {self.release_name} ingress-nginx/ingress-nginx "
             f"--namespace {self.namespace} --create-namespace "
             "--set controller.service.type=ClusterIP "
-            "--set controller.ingressClassResource.default=true "
+            f"--set controller.ingressClassResource.default={'true' if set_default else 'false'} "
             "--set controller.watchIngressWithoutClass=true"
         )
         self._wait_for_ready(timeout=120)

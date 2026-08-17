@@ -821,7 +821,6 @@ class Conductor:
             self.khaos.ensure_deployed()
 
         self.logger.info("[DEPLOY] Setting up OpenEBS…")
-        self._preflight_openebs_udev_mount()
         self.kubectl.exec_command("kubectl apply -f https://openebs.github.io/charts/openebs-operator.yaml")
         # Only promote openebs-hostpath to default when the cluster has no default
         # StorageClass yet — sre-test1 already uses Longhorn as its default and
@@ -893,36 +892,6 @@ class Conductor:
         """Teardown problem.app and, if no other apps running, OpenEBS/Prometheus."""
         if self.problem:
             self.problem.app.cleanup()
-
-    def _preflight_openebs_udev_mount(self) -> None:
-        if shutil.which("docker") is None:
-            self.logger.info("[DEPLOY] Docker is unavailable; skipping kind /run/udev preflight")
-            return
-
-        nodes_output = self.kubectl.exec_command(
-            "kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{\"\\n\"}{end}'"
-        )
-        missing_nodes: list[str] = []
-
-        for node in (line.strip() for line in nodes_output.splitlines()):
-            if not node or " " in node:
-                continue
-            quoted_node = shlex.quote(node)
-            result = self.kubectl.exec_command(
-                f"docker inspect {quoted_node} >/dev/null 2>&1 "
-                f"&& docker exec {quoted_node} sh -c 'test -d /run/udev && echo ok || echo missing' "
-                "|| echo not-a-docker-node"
-            ).strip()
-            if result == "missing":
-                missing_nodes.append(node)
-
-        if missing_nodes:
-            missing_list = ", ".join(missing_nodes)
-            raise RuntimeError(
-                "OpenEBS node-disk-manager requires /run/udev inside kind node containers. "
-                f"Missing /run/udev on: {missing_list}. Create /run/udev on the host before kind cluster "
-                "creation and mount hostPath /run/udev to containerPath /run/udev in the kind config."
-            )
 
     def _ensure_openebs_device_storageclass(self) -> None:
         self.logger.info("[DEPLOY] Ensuring OpenEBS LocalPV-Device StorageClass…")
