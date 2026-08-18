@@ -56,6 +56,33 @@ def test_extra_sregym_populated(tmp_path):
 EXPECTED_DIAGNOSIS_STEP = 8
 
 
+def test_oracle_results_csv_populates_ground_truth(tmp_path):
+    """extra.sregym must carry the oracle-verified outcome, not just the
+    driver's process-exit ``submitted`` flag (see conductor.py's
+    ``_evaluate_diagnosis``/``_evaluate_mitigation``, flattened by main.py's
+    ``snapshot`` into ``<problem_id>_results.csv`` via ``RunArtifacts``)."""
+    run_dir = _canonical_run_dir(tmp_path)
+    (run_dir / "service_port_conflict_hotel_reservation_results.csv").write_text(
+        "Diagnosis.success,Mitigation.success,TTL,TTM,attempt,problem_id\n"
+        "True,False,65.4,150.8,1,service_port_conflict_hotel_reservation\n",
+        encoding="utf-8",
+    )
+    traj = convert.convert_run(run_dir)
+    sregym = traj.extra["sregym"]
+    assert sregym["diagnosis_success"] is True
+    assert sregym["mitigation_success"] is False
+    assert sregym["ttl_seconds"] == pytest.approx(65.4)
+    assert sregym["ttm_seconds"] == pytest.approx(150.8)
+
+
+def test_missing_oracle_results_csv_omits_ground_truth_keys(tmp_path):
+    run_dir = _canonical_run_dir(tmp_path)
+    traj = convert.convert_run(run_dir)
+    sregym = traj.extra["sregym"]
+    assert "diagnosis_success" not in sregym
+    assert "mitigation_success" not in sregym
+
+
 def test_diagnosis_submitted_step(tmp_path):
     run_dir = _canonical_run_dir(tmp_path)
     traj = convert.convert_run(run_dir)

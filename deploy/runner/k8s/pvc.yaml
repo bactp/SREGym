@@ -1,0 +1,28 @@
+# Shared results volume. Each Job writes to its own subdirectory via
+# subPathExpr (see job-template.yaml), so concurrent Jobs never collide on
+# paths — this single RWX volume just needs to outlive any individual Job so
+# results can be aggregated after all of them complete.
+#
+# Sized to 20Gi (not larger): the mgmt cluster's Longhorn nodes already have
+# ~90.7Gi scheduled out of ~211Gi each, and the `storage-minimal-available-
+# percentage` setting (25) reserves ~52.8Gi per node — leaving only ~67.7Gi of
+# real per-node headroom for a new replica. A 100Gi request left Longhorn with
+# "no available disk candidates" on every node (confirmed via `kubectl logs
+# -n longhorn-system -l app=longhorn-manager`). ATIF trajectories are small
+# JSON/CSV, so 20Gi has plenty of margin; raise it only after confirming
+# headroom with `kubectl get nodes.longhorn.io -n longhorn-system -o json`.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sregym-results
+  namespace: sregym-runner
+  labels:
+    app.kubernetes.io/name: sregym-runner
+    app.kubernetes.io/component: runner
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: sregym-runner-results
+  resources:
+    requests:
+      storage: 20Gi

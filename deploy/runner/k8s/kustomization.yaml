@@ -1,0 +1,24 @@
+# Shared, cluster-independent resources — apply once with:
+#   kubectl apply -k deploy/runner/k8s/
+# Per-cluster Jobs live under overlays/cluster-*/ (each references
+# job-template.yaml directly, not through this kustomization).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: sregym-runner
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - storageclass.yaml
+  - pvc.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: sregym-runner
+      app.kubernetes.io/managed-by: kustomize
+
+images:
+  - name: sregym-runner
+    newName: phuongbac/sregym-runner
+    newTag: latest

@@ -13,5 +13,6 @@ spec:
       port: 9954
       targetPort: http
       protocol: TCP
+      nodePort: 31954
   selector:
     app.kubernetes.io/name: mcp-server

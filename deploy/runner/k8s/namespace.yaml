@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sregym-runner
+  labels:
+    app.kubernetes.io/name: sregym-runner
+    app.kubernetes.io/component: runner

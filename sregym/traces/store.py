@@ -93,6 +93,10 @@ CREATE TABLE IF NOT EXISTS trajectories (
     results_path             TEXT,
     submitted                INTEGER,
     diagnosis_submitted_step INTEGER,
+    diagnosis_success        INTEGER,            -- oracle-verified (conductor), NOT the same as `submitted`
+    mitigation_success       INTEGER,            -- oracle-verified (conductor), NOT the same as `submitted`
+    ttl_seconds              REAL,               -- time-to-diagnose, from the conductor's oracle CSV
+    ttm_seconds              REAL,               -- time-to-mitigate, from the conductor's oracle CSV
     num_steps                INTEGER NOT NULL,
     total_prompt_tokens      INTEGER,
     total_completion_tokens  INTEGER,
@@ -176,8 +180,28 @@ class TrajectorySummary:
     application: str | None
     run: int | None
     submitted: bool | None
+    diagnosis_success: bool | None
+    mitigation_success: bool | None
     num_steps: int
     total_cost_usd: float | None
+
+
+# Columns added to `trajectories` after its initial release. `CREATE TABLE IF
+# NOT EXISTS` is a no-op against a pre-existing file, so a database created
+# before one of these was added needs an explicit ALTER TABLE to pick it up.
+_TRAJECTORY_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
+    ("diagnosis_success", "INTEGER"),
+    ("mitigation_success", "INTEGER"),
+    ("ttl_seconds", "REAL"),
+    ("ttm_seconds", "REAL"),
+]
+
+
+def _apply_column_migrations(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(trajectories)")}
+    for name, sql_type in _TRAJECTORY_COLUMN_MIGRATIONS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE trajectories ADD COLUMN {name} {sql_type}")
 
 
 @contextmanager
@@ -188,6 +212,7 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH) -> Iterator[sqlite3.Connectio
     conn.execute("PRAGMA foreign_keys = ON")
     try:
         conn.executescript(_SCHEMA)
+        _apply_column_migrations(conn)
         yield conn
         conn.commit()
     finally:
@@ -259,6 +284,8 @@ def _insert_trajectory(
     agent = trajectory.agent
     fm = trajectory.final_metrics
     submitted = sregym.get("submitted")
+    diagnosis_success = sregym.get("diagnosis_success")
+    mitigation_success = sregym.get("mitigation_success")
 
     conn.execute(
         """
@@ -266,12 +293,13 @@ def _insert_trajectory(
             trajectory_id, parent_trajectory_id, sibling_seq, session_id, schema_version,
             agent_name, agent_version, model_name, problem_id, application,
             batch, run, results_path, submitted, diagnosis_submitted_step,
+            diagnosis_success, mitigation_success, ttl_seconds, ttm_seconds,
             num_steps, total_prompt_tokens, total_completion_tokens,
             total_cached_tokens, total_cost_usd, total_steps, notes,
             continued_trajectory_ref, tool_definitions, agent_extra,
             final_metrics_extra, extra
         ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             jsonb(?), jsonb(?), jsonb(?), jsonb(?)
         )
         """,
@@ -291,6 +319,10 @@ def _insert_trajectory(
             sregym.get("results_path"),
             None if submitted is None else int(bool(submitted)),
             sregym.get("diagnosis_submitted_step"),
+            None if diagnosis_success is None else int(bool(diagnosis_success)),
+            None if mitigation_success is None else int(bool(mitigation_success)),
+            sregym.get("ttl_seconds"),
+            sregym.get("ttm_seconds"),
             len(trajectory.steps),
             fm.total_prompt_tokens if fm else None,
             fm.total_completion_tokens if fm else None,
@@ -613,6 +645,8 @@ def query(
     agent: str | None = None,
     application: str | None = None,
     submitted: bool | None = None,
+    diagnosis_success: bool | None = None,
+    mitigation_success: bool | None = None,
     include_subagents: bool = False,
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> list[TrajectorySummary]:
@@ -620,6 +654,10 @@ def query(
 
     By default only root trajectories are listed (``parent_trajectory_id IS
     NULL``); set ``include_subagents`` to include embedded subagent rows.
+
+    ``submitted`` reflects the client driver's process-exit code; use
+    ``diagnosis_success``/``mitigation_success`` for the oracle-verified
+    ground truth (e.g. to select trajectories for SFT mining).
     """
     clauses: list[str] = []
     params: list[Any] = []
@@ -637,11 +675,19 @@ def query(
     if submitted is not None:
         clauses.append("submitted = ?")
         params.append(int(submitted))
+    if diagnosis_success is not None:
+        clauses.append("diagnosis_success = ?")
+        params.append(int(diagnosis_success))
+    if mitigation_success is not None:
+        clauses.append("mitigation_success = ?")
+        params.append(int(mitigation_success))
 
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = (
         "SELECT trajectory_id, agent_name, problem_id, application, run, submitted, "
-        "num_steps, total_cost_usd FROM trajectories" + where + " ORDER BY problem_id, agent_name, run"
+        "diagnosis_success, mitigation_success, num_steps, total_cost_usd FROM trajectories"
+        + where
+        + " ORDER BY problem_id, agent_name, run"
     )
     with connect(db_path) as conn:
         rows = conn.execute(sql, params).fetchall()
@@ -653,6 +699,8 @@ def query(
             application=r["application"],
             run=r["run"],
             submitted=None if r["submitted"] is None else bool(r["submitted"]),
+            diagnosis_success=None if r["diagnosis_success"] is None else bool(r["diagnosis_success"]),
+            mitigation_success=None if r["mitigation_success"] is None else bool(r["mitigation_success"]),
             num_steps=r["num_steps"],
             total_cost_usd=r["total_cost_usd"],
         )
@@ -701,7 +749,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_list.add_argument("--problem", help="Filter by problem_id.")
     p_list.add_argument("--agent", help="Filter by agent name.")
     p_list.add_argument("--application", help="Filter by application display name.")
-    p_list.add_argument("--submitted", choices=("true", "false"), help="Filter by submission success.")
+    p_list.add_argument("--submitted", choices=("true", "false"), help="Filter by driver process-exit success.")
+    p_list.add_argument(
+        "--diagnosis-success", choices=("true", "false"), help="Filter by oracle-verified diagnosis outcome."
+    )
+    p_list.add_argument(
+        "--mitigation-success", choices=("true", "false"), help="Filter by oracle-verified mitigation outcome."
+    )
 
     sub.add_parser("stats", help="Show counts by problem type and agent.")
     return parser
@@ -725,19 +779,23 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "list":
-        submitted = {"true": True, "false": False}.get(getattr(args, "submitted", None))
+        as_bool = {"true": True, "false": False}.get
         summaries = query(
             problem_id=args.problem,
             agent=args.agent,
             application=args.application,
-            submitted=submitted,
+            submitted=as_bool(getattr(args, "submitted", None)),
+            diagnosis_success=as_bool(getattr(args, "diagnosis_success", None)),
+            mitigation_success=as_bool(getattr(args, "mitigation_success", None)),
             db_path=args.db,
         )
         for s in summaries:
             cost = "" if s.total_cost_usd is None else f"${s.total_cost_usd:.4f}"
             print(
                 f"{s.agent:<11} {str(s.problem_id):<40} run={s.run} "
-                f"steps={s.num_steps:<4} submitted={s.submitted} {cost}\t{s.trajectory_id}"
+                f"steps={s.num_steps:<4} submitted={s.submitted} "
+                f"diagnosis_success={s.diagnosis_success} mitigation_success={s.mitigation_success} "
+                f"{cost}\t{s.trajectory_id}"
             )
         logger.info("%d trajectory(ies).", len(summaries))
         return 0

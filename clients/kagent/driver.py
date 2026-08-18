@@ -261,9 +261,13 @@ def main():
     problem_id = resolve_problem_id(cli_problem_id=args.problem_id)
     logger.info(f"Problem ID (harness): {problem_id}")
 
-    gateway = KagentGateway(namespace=args.kagent_namespace, port=args.kagent_port)
-    gateway.ensure_started()
-    kagent_url = f"http://127.0.0.1:{args.kagent_port}"
+    kagent_url = os.environ.get("KAGENT_CONTROLLER_URL")
+    if kagent_url:
+        logger.info(f"Using KAGENT_CONTROLLER_URL override, skipping port-forward: {kagent_url}")
+    else:
+        gateway = KagentGateway(namespace=args.kagent_namespace, port=args.kagent_port)
+        gateway.ensure_started()
+        kagent_url = f"http://127.0.0.1:{args.kagent_port}"
 
     try:
         stage = wait_for_ready_stage(timeout=300)

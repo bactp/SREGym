@@ -10,6 +10,7 @@ Canonical run path layout (post-finalization, host-side):
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import re
@@ -228,7 +229,13 @@ def map_application(problem_id: str) -> str | None:
 
 
 def _read_result_json(run_dir: Path) -> dict[str, Any] | None:
-    """Read the per-run ``<tool>_results_<problem>_<ts>.json`` if present."""
+    """Read the per-run ``<tool>_results_<problem>_<ts>.json`` if present.
+
+    This file is written by the tool's own client driver (e.g.
+    ``clients/claudecode/driver.py``) and its ``"success"`` key is the CLI
+    process's exit code, NOT an oracle-verified task outcome — see
+    ``_read_oracle_results_csv`` for the real ground truth.
+    """
     candidates = sorted(run_dir.glob("*_results_*.json"))
     for path in candidates:
         try:
@@ -238,6 +245,42 @@ def _read_result_json(run_dir: Path) -> dict[str, Any] | None:
         if isinstance(data, dict) and "success" in data:
             return data
     return None
+
+
+def _read_oracle_results_csv(run_dir: Path, problem_id: str) -> dict[str, str] | None:
+    """Read the per-attempt ``<problem_id>_results.csv`` oracle verdict, if present.
+
+    Written by ``RunArtifacts.finalize_and_publish`` (see ``sregym/run_artifacts.py``
+    and ``main.py``'s ``snapshot`` dict) from the conductor's actual stage
+    evaluation (``problem.diagnosis_oracle.evaluate()`` /
+    ``problem.mitigation_oracle.evaluate()``), flattened into columns like
+    ``Diagnosis.success``, ``Mitigation.success``, ``TTL``, ``TTM``. This is the
+    real ground-truth label — unlike ``_read_result_json``'s process-exit
+    ``"success"``, it reflects whether the oracle actually verified the
+    diagnosis/mitigation against the live cluster.
+    """
+    path = run_dir / f"{problem_id}_results.csv"
+    try:
+        with path.open(newline="", encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+    except OSError:
+        return None
+    return rows[0] if rows else None
+
+
+def _parse_bool(value: str | None) -> bool | None:
+    if value is None or value == "":
+        return None
+    return value.strip().lower() == "true"
+
+
+def _parse_float(value: str | None) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def _is_submission_response(text: str) -> bool:
@@ -290,7 +333,7 @@ def _find_diagnosis_submitted_step(trajectory: Trajectory) -> int | None:
 
 
 def build_sregym_meta(run_dir: Path, info: RunPathInfo) -> dict[str, Any]:
-    """Assemble the ``extra.sregym`` payload from the path + result JSON."""
+    """Assemble the ``extra.sregym`` payload from the path, result JSON, and oracle CSV."""
     meta: dict[str, Any] = {
         "problem_id": info.problem_id,
         "run": info.run,
@@ -303,6 +346,21 @@ def build_sregym_meta(run_dir: Path, info: RunPathInfo) -> dict[str, Any]:
     result = _read_result_json(run_dir)
     if result is not None:
         meta["submitted"] = bool(result.get("success"))
+
+    oracle = _read_oracle_results_csv(run_dir, info.problem_id)
+    if oracle is not None:
+        diagnosis_success = _parse_bool(oracle.get("Diagnosis.success"))
+        if diagnosis_success is not None:
+            meta["diagnosis_success"] = diagnosis_success
+        mitigation_success = _parse_bool(oracle.get("Mitigation.success"))
+        if mitigation_success is not None:
+            meta["mitigation_success"] = mitigation_success
+        ttl_seconds = _parse_float(oracle.get("TTL"))
+        if ttl_seconds is not None:
+            meta["ttl_seconds"] = ttl_seconds
+        ttm_seconds = _parse_float(oracle.get("TTM"))
+        if ttm_seconds is not None:
+            meta["ttm_seconds"] = ttm_seconds
 
     return meta
 

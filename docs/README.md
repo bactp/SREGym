@@ -8,3 +8,7 @@ Local operational documentation for this deployment (not part of upstream SREGym
 - [`kagent-integration.md`](./kagent-integration.md) — how [KAgent](https://kagent.dev) agents are
   installed on the management cluster and plugged into SREGym as additional `--agent` options,
   reusing SREGym's own MCP tool servers instead of a bespoke tool integration.
+- [`parallel-runner-guide.md`](./parallel-runner-guide.md) — running SREGym as Kubernetes Jobs on
+  the management cluster (one per workload cluster) instead of a single host process, using
+  KAgent agents: what runs where, the RemoteMCPServer fix this requires, and a step-by-step guide
+  to running one episode.

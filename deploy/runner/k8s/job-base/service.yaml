@@ -1,0 +1,26 @@
+# Per-cluster stable in-cluster address for this overlay's runner Pod.
+# Selector includes app.kubernetes.io/instance (set per overlay via patch.yaml)
+# so each cluster's Job gets its own Service — e.g. sregym-runner-sre-test1 —
+# instead of one shared Service matching every active Job's Pods. This is what
+# each cluster's dedicated sregym-submit-<cluster> RemoteMCPServer CRD points
+# at (see docs/parallel-runner-guide.md).
+apiVersion: v1
+kind: Service
+metadata:
+  name: sregym-runner
+  namespace: sregym-runner
+  labels:
+    app.kubernetes.io/name: sregym-runner
+    app.kubernetes.io/component: runner
+spec:
+  selector:
+    app.kubernetes.io/name: sregym-runner
+    app.kubernetes.io/component: runner
+    app.kubernetes.io/instance: CHANGEME
+  ports:
+    - name: conductor-api
+      port: 8000
+      targetPort: 8000
+    - name: mcp
+      port: 9954
+      targetPort: 9954

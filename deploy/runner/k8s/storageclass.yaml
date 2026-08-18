@@ -1,0 +1,25 @@
+# The cluster-default `longhorn` StorageClass requests numberOfReplicas: 3,
+# but the mgmt cluster only has 2 Longhorn-schedulable worker nodes
+# (sre-worker01, sre-worker02) — 3-way replication can never be satisfied,
+# leaving any PVC using it permanently "faulted" (insufficient storage;
+# precheck new replica failed). This dedicated class matches the real
+# topology. Benchmark trajectories are regenerable, so 2-way redundancy
+# (rather than 1, which would risk data loss on a single node failure) is a
+# reasonable tradeoff here.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: sregym-runner-results
+  labels:
+    app.kubernetes.io/name: sregym-runner
+    app.kubernetes.io/component: runner
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "2"
+  staleReplicaTimeout: "30"
+  fromBackup: ""
+  fsType: "ext4"
+  dataLocality: "disabled"

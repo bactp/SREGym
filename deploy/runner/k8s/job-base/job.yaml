@@ -1,0 +1,112 @@
+# Job template — one Job = one parallel SREGym run against one workload
+# cluster, using a KAgent-hosted agent (container_isolation: false in
+# agents.yaml — no local docker/dind needed, see comment below). Not applied
+# directly: each per-cluster overlay (../../overlays/cluster-*) references
+# this job-base/ directory as a Kustomize resource and patches Job name
+# (nameSuffix), the target-kubeconfig Secret name, and the
+# PROBLEM_ID/AGENT_NAME/N_ATTEMPTS env values. Nothing else needs to change
+# between clusters. The shared namespace/serviceaccount/storageclass/pvc one
+# directory up (../kustomization.yaml) are applied once, separately (they're
+# cluster-independent).
+#
+# Single container, no dind sidecar: KAgent-based agents (agents.yaml entries
+# with container_isolation: false) never run through container_runner.py's
+# `docker run` path — the actual LLM agent runs as a pre-existing kagent
+# Agent CRD on this same mgmt cluster (namespace `kagent`); `clients/kagent/
+# driver.py` just shells out to `kagent invoke` and polls the conductor's own
+# /status (both same-container, plain localhost — no network tricks needed).
+# `dind` is only required for Docker-container agents like Stratus, which
+# aren't used here.
+#
+# Reaching the kagent-controller API: driver.py defaults to `kubectl
+# port-forward` (needs a kubeconfig for whatever cluster kagent-controller
+# lives on), but since this Pod already runs ON that same mgmt cluster, we
+# skip the port-forward entirely via the KAGENT_CONTROLLER_URL env override
+# (see clients/kagent/driver.py) and call the ClusterIP Service directly
+# through in-cluster DNS — one fewer moving part, and no mgmt-cluster
+# kubeconfig Secret needed at all.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sregym-runner
+  namespace: sregym-runner
+  labels:
+    app.kubernetes.io/name: sregym-runner
+    app.kubernetes.io/component: runner
+    app.kubernetes.io/instance: CHANGEME
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sregym-runner
+        app.kubernetes.io/component: runner
+        app.kubernetes.io/instance: CHANGEME
+    spec:
+      restartPolicy: Never
+      serviceAccountName: sregym-runner
+      containers:
+        - name: runner
+          image: sregym-runner:latest
+          workingDir: /workspace
+          command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /workspace/SREGym-applications
+              cp -r /opt/app/SREGym-applications/. /workspace/SREGym-applications/
+              python /opt/app/main.py \
+                --problem "$PROBLEM_ID" \
+                --agent "$AGENT_NAME" \
+                --n-attempts "$N_ATTEMPTS" \
+                --target-kubeconfig /secrets/target/kubeconfig
+          # LLM credentials (e.g. OPENAI_API_KEY) for the judge model (the
+          # judge always runs via LiteLLM regardless of agent type; the agent
+          # itself, being KAgent-hosted, gets its own credentials from its
+          # Agent CRD config, not from here). main.py's --env-file .env
+          # default won't find anything useful in /workspace, so this must
+          # come from a Secret instead. `optional: true` so the Job still
+          # applies without it (main.py will just fail its judge pre-flight
+          # check with a clear error, as verified in a real test run).
+          envFrom:
+            - secretRef:
+                name: llm-credentials
+                optional: true
+          env:
+            - name: JOB_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['job-name']
+            - name: KUBECONFIG
+              value: /secrets/target/kubeconfig
+            - name: KAGENT_CONTROLLER_URL
+              value: http://kagent-controller.kagent.svc.cluster.local:8083
+            # Overridden per cluster overlay.
+            - name: PROBLEM_ID
+              value: CHANGEME
+            - name: AGENT_NAME
+              value: kagent
+            - name: N_ATTEMPTS
+              value: "1"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+              subPathExpr: "$(JOB_NAME)"
+            - name: target-kubeconfig
+              mountPath: /secrets/target
+              readOnly: true
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: sregym-results
+        # Overridden per cluster overlay (secretName only).
+        - name: target-kubeconfig
+          secret:
+            secretName: target-kubeconfig-CHANGEME

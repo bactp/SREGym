@@ -19,6 +19,8 @@ def _sample_atif(
     problem_id: str = "service_port_conflict_hotel_reservation",
     agent: str = "codex",
     submitted: bool = True,
+    diagnosis_success: bool | None = None,
+    mitigation_success: bool | None = None,
 ) -> dict:
     """A minimal-but-rich valid ATIF document exercising most fields."""
     return {
@@ -74,6 +76,8 @@ def _sample_atif(
                 "application": "Hotel Reservation",
                 "submitted": submitted,
                 "diagnosis_submitted_step": 2,
+                **({"diagnosis_success": diagnosis_success} if diagnosis_success is not None else {}),
+                **({"mitigation_success": mitigation_success} if mitigation_success is not None else {}),
             }
         },
     }
@@ -170,6 +174,88 @@ def test_query_filters(tmp_path):
     assert {s.trajectory_id for s in store.query(agent="codex", db_path=db)} == {"a", "c"}
     assert {s.trajectory_id for s in store.query(problem_id="p1", agent="codex", db_path=db)} == {"a"}
     assert {s.trajectory_id for s in store.query(submitted=False, db_path=db)} == {"b"}
+
+
+def test_query_filters_by_oracle_ground_truth(tmp_path):
+    """diagnosis_success/mitigation_success are the oracle-verified labels used
+    to select trajectories for SFT mining -- distinct from `submitted`, which
+    only reflects the driver's process-exit code."""
+    db = tmp_path / "traces.db"
+    store.upsert(
+        Trajectory.model_validate(
+            _sample_atif("a", problem_id="p1", diagnosis_success=True, mitigation_success=True)
+        ),
+        db,
+    )
+    store.upsert(
+        Trajectory.model_validate(
+            _sample_atif("b", problem_id="p1", diagnosis_success=True, mitigation_success=False)
+        ),
+        db,
+    )
+    store.upsert(Trajectory.model_validate(_sample_atif("c", problem_id="p1")), db)  # no oracle data at all
+
+    assert {s.trajectory_id for s in store.query(mitigation_success=True, db_path=db)} == {"a"}
+    assert {s.trajectory_id for s in store.query(mitigation_success=False, db_path=db)} == {"b"}
+    assert {s.trajectory_id for s in store.query(diagnosis_success=True, db_path=db)} == {"a", "b"}
+
+    got = store.query(problem_id="p1", db_path=db)
+    by_id = {s.trajectory_id: s for s in got}
+    assert by_id["a"].mitigation_success is True
+    assert by_id["b"].mitigation_success is False
+    assert by_id["c"].mitigation_success is None
+
+
+def test_migration_adds_oracle_columns_to_preexisting_db(tmp_path):
+    """A database created before diagnosis_success/mitigation_success/ttl_seconds/
+    ttm_seconds existed must gain them via ALTER TABLE, not just on a fresh file."""
+    import sqlite3
+
+    db = tmp_path / "traces.db"
+    old_schema = """
+    CREATE TABLE trajectories (
+        trajectory_id TEXT PRIMARY KEY,
+        parent_trajectory_id TEXT,
+        sibling_seq INTEGER,
+        session_id TEXT,
+        schema_version TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        agent_version TEXT,
+        model_name TEXT,
+        problem_id TEXT,
+        application TEXT,
+        batch TEXT,
+        run INTEGER,
+        results_path TEXT,
+        submitted INTEGER,
+        diagnosis_submitted_step INTEGER,
+        num_steps INTEGER NOT NULL,
+        total_prompt_tokens INTEGER,
+        total_completion_tokens INTEGER,
+        total_cached_tokens INTEGER,
+        total_cost_usd REAL,
+        total_steps INTEGER,
+        notes TEXT,
+        continued_trajectory_ref TEXT,
+        tool_definitions JSONB,
+        agent_extra JSONB,
+        final_metrics_extra JSONB,
+        extra JSONB,
+        ingested_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    """
+    conn = sqlite3.connect(str(db))
+    conn.executescript(old_schema)
+    conn.close()
+
+    # connect() must migrate the pre-existing file in place, not fail.
+    with store.connect(db) as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(trajectories)")}
+    assert {"diagnosis_success", "mitigation_success", "ttl_seconds", "ttm_seconds"} <= columns
+
+    # And the store must be fully usable afterwards.
+    store.upsert(Trajectory.model_validate(_sample_atif("a", mitigation_success=True)), db)
+    assert {s.trajectory_id for s in store.query(mitigation_success=True, db_path=db)} == {"a"}
 
 
 def test_stats_groups(tmp_path):

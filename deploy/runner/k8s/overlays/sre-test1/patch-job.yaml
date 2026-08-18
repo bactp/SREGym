@@ -1,0 +1,30 @@
+# Edit PROBLEM_ID/AGENT_NAME/N_ATTEMPTS for the actual scenario assigned to
+# this cluster. target-kubeconfig secret and instance label must stay in
+# sync with the RemoteMCPServer/Agent CRDs created for this cluster (see
+# ../../../README.md and docs/parallel-runner-guide.md).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sregym-runner
+  namespace: sregym-runner
+  labels:
+    app.kubernetes.io/instance: sre-test1
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: sre-test1
+    spec:
+      volumes:
+        - name: target-kubeconfig
+          secret:
+            secretName: target-kubeconfig-sre-test1
+      containers:
+        - name: runner
+          env:
+            - name: PROBLEM_ID
+              value: k8s_target_port-misconfig
+            - name: AGENT_NAME
+              value: kagent-sre-test1
+            - name: N_ATTEMPTS
+              value: "1"
