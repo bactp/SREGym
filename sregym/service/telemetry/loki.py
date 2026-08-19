@@ -5,7 +5,7 @@ import subprocess
 
 import yaml
 
-from sregym.paths import BASE_DIR, LOKI_METADATA
+from sregym.paths import BASE_DIR, BASE_PARENT_DIR, LOKI_METADATA
 from sregym.service.helm import Helm
 from sregym.service.kubectl import KubeCtl
 
@@ -104,10 +104,22 @@ class Loki:
         self._deploy_promtail()
 
     def _add_grafana_helm_repo(self):
-        """Add Grafana Helm repository for Loki chart."""
+        """Add Grafana Helm repository for Loki chart.
+
+        Points at a local file:// repo baked into the runner image (see
+        deploy/runner/Dockerfile) instead of the live
+        https://grafana.github.io/helm-charts URL: that index.yaml is large
+        enough to routinely exceed helm's fetch timeout, which silently
+        breaks Loki/Promtail deploy for every problem, not just ones that
+        happen to touch Grafana directly.
+        """
         self.logger.info("Adding Grafana Helm repository...")
+        grafana_repo_dir = BASE_PARENT_DIR / "helm-repos" / "grafana"
+        # Outside the runner image (e.g. a dev running main.py directly) the
+        # vendored repo won't exist, so fall back to the live URL there.
+        repo_url = f"file://{grafana_repo_dir}" if grafana_repo_dir.is_dir() else "https://grafana.github.io/helm-charts"
         try:
-            KubeCtl().exec_command("helm repo add grafana https://grafana.github.io/helm-charts")
+            KubeCtl().exec_command(f"helm repo add grafana {repo_url}")
             KubeCtl().exec_command("helm repo update")
         except Exception as e:
             self.logger.warning(f"Failed to add Grafana Helm repo (may already exist): {e}")

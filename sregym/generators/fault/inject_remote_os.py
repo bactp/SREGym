@@ -217,8 +217,11 @@ class RemoteOSFaultInjector(FaultInjector):
                 return
             for container in containers:
                 print(f"Starting kubelet in {container}...")
-                self._docker_exec(container, "systemctl start kubelet")
-                print(f"Kubelet started in {container}")
+                try:
+                    self._docker_exec(container, "systemctl start kubelet")
+                    print(f"Kubelet started in {container}")
+                except Exception as e:
+                    print(f"Could not start kubelet in {container}: {e}")
         else:
             if not self._check_remote_host():
                 return
@@ -227,8 +230,13 @@ class RemoteOSFaultInjector(FaultInjector):
                 return
             for host, user in worker_info.items():
                 print(f"Starting kubelet on {host}...")
-                self._ssh_exec(host, user, "sudo systemctl start kubelet")
-                print(f"Kubelet started on {host}")
+                try:
+                    self._ssh_exec(host, user, "sudo systemctl start kubelet")
+                    print(f"Kubelet started on {host}")
+                except Exception as e:
+                    # One unreachable/flaky host must not abort recovery for
+                    # every worker node after it in iteration order.
+                    print(f"Could not start kubelet on {host}: {e}")
 
         self._wait_for_worker_nodes("Ready")
 
@@ -333,7 +341,12 @@ class RemoteOSFaultInjector(FaultInjector):
                 return
             nodes = self._get_worker_node_names()
         for node_name in nodes:
-            self.recover_disk_pressure(node_name)
+            try:
+                self.recover_disk_pressure(node_name)
+            except Exception as e:
+                # One unreachable/flaky node must not abort recovery for
+                # every other worker node in this loop.
+                print(f"Could not recover disk pressure on {node_name}: {e}")
 
     def recover_clock_drift(self):
         """Detect leftover clock-drift injector/restore pods from interrupted

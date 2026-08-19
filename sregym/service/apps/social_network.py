@@ -83,8 +83,17 @@ class SocialNetwork(Application):
         Helm.uninstall(**self.helm_configs)
 
     def cleanup(self):
-        """Delete the entire namespace for the social network application."""
-        Helm.uninstall(**self.helm_configs)
+        """Delete the entire namespace for the social network application.
+
+        Each step is best-effort: Helm.uninstall() raises RuntimeError on a
+        non-zero helm exit (e.g. a stuck release), which must not skip the
+        job/namespace deletion after it -- those are what actually leave the
+        cluster clean for the next run.
+        """
+        try:
+            Helm.uninstall(**self.helm_configs)
+        except Exception as e:
+            self.logger.warning(f"Helm uninstall failed during cleanup for '{self.namespace}': {e}")
 
         if hasattr(self, "wrk"):
             # self.wrk.stop()

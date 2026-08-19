@@ -280,10 +280,16 @@ class FleetCast(Application):
         self.kubectl.wait_for_namespace_deletion(self.namespace)
 
     def cleanup(self):
-        Helm.uninstall(**self.helm_configs)
+        try:
+            Helm.uninstall(**self.helm_configs)
+        except Exception as e:
+            self.logger.warning(f"Helm uninstall failed during cleanup for '{self.namespace}': {e}")
         self.kubectl.delete_namespace(self.helm_configs["namespace"])
         if hasattr(self, "wrk"):
-            self.wrk.stop()
+            try:
+                self.wrk.stop()
+            except Exception as e:
+                self.logger.warning(f"Failed to stop workload generator during cleanup: {e}")
 
     def create_workload(self):
         self.wrk = LocustWorkloadManager(

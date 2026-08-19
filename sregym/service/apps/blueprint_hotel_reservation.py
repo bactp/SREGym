@@ -41,7 +41,14 @@ class BlueprintHotelReservation(Application):
     def cleanup(self):
         """Delete the entire namespace for the hotel reservation application."""
         self.kubectl.delete_namespace(self.namespace)
-        self.kubectl.wait_for_namespace_deletion(self.namespace)
+        # delete_namespace() already waited internally (best-effort, logs
+        # rather than raising on timeout); this second explicit wait is
+        # redundant confirmation, not a new attempt -- a real still-stuck
+        # namespace here must not skip the job deletion below.
+        try:
+            self.kubectl.wait_for_namespace_deletion(self.namespace)
+        except Exception as e:
+            logger.warning(f"Namespace '{self.namespace}' still not deleted after cleanup wait: {e}")
         self.kubectl.delete_job(label="job=workload", namespace=self.namespace)
 
     # helper methods

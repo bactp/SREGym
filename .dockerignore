@@ -1,0 +1,77 @@
+# Build context exclusions, shared by every image built from the repo root
+# (deploy/runner/Dockerfile, mcp_server/Dockerfile). docker/agents/build.sh
+# builds from its own docker/agents/build-context/ dir, so it is unaffected.
+#
+# Two jobs here: keep credentials out of the context entirely (a build context
+# is uploaded to the daemon and anything in it can end up in a layer), and keep
+# the ~1.5G of local state out so builds don't spend minutes on the upload.
+#
+# Everything the Dockerfiles COPY must stay OUT of this file: pyproject.toml,
+# uv.lock, main.py, agents.yaml, sregym/, mcp_server/, clients/, logger/,
+# llm_backend/, atif_converter/, docker/, scripts/, SREGym-applications/.
+
+# --- Credentials. Never in a build context. ---
+.env
+.env.*
+*.pem
+provisioner_ssh_key
+provisioner_ssh_key.pub
+kubeconfig.yaml
+context.json
+*.login.info.txt
+sregym/config.yml
+scripts/ansible/inventory.yml
+
+# --- Local state: large, machine-specific, regenerated in-image. ---
+.git
+**/.git
+.venv
+venv/
+env/
+ENV/
+.runtime/
+results/
+logs/
+trace_output/
+metrics_output/
+cache_dir/
+data/
+demos/
+wandb/
+taskweaver_proj/
+docker/agents/build-context/
+sregym/observer/telemetry_data_*/
+dataset/functional/**/groundtruth/
+dataset/functional/**/log/
+dataset/functional/**/metric/
+dataset/functional/**/trace/
+sregym/conductor/tasklist.yml
+
+# --- Python / test caches. ---
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+
+# --- Dev-only trees. Not COPY'd by any Dockerfile; --no-dev skips their deps. ---
+tests/
+docs/
+python-database/
+
+# --- Editor / agent tooling. ---
+.vscode/
+.idea/
+.claude/
+.cursor/
+.kiro/
+.pi/
+CLAUDE.md
+AGENTS.md
+.DS_Store

@@ -28,7 +28,11 @@ class CompositeApp:
             app.deploy()
 
         with ThreadPoolExecutor() as executor:
-            executor.map(deploy_app, self.apps.values())
+            # executor.map() submits every future immediately, but only
+            # raises a sub-app's exception once its result is consumed --
+            # `list(...)` forces that, so a broken deploy fails loudly
+            # instead of silently leaving that app undeployed.
+            list(executor.map(deploy_app, self.apps.values()))
 
     def start_workload(self):
         def start_workload_app(app):
@@ -36,12 +40,20 @@ class CompositeApp:
             app.start_workload()
 
         with ThreadPoolExecutor() as executor:
-            executor.map(start_workload_app, self.apps.values())
+            list(executor.map(start_workload_app, self.apps.values()))
 
     def cleanup(self):
         def cleanup_app(app):
             print(f"[CompositeApp] Cleaning up {app.name}...")
-            app.cleanup()
+            try:
+                app.cleanup()
+            except Exception as e:
+                # Best-effort: one app's cleanup failing must not hide the
+                # failure (executor.map()'s result was never consumed before,
+                # so this used to be silently swallowed) and must not stop
+                # the other apps -- each already runs in its own thread, so
+                # this only affects visibility, not whether they get attempted.
+                print(f"[CompositeApp] Cleanup failed for {app.name}: {e}")
 
         with ThreadPoolExecutor() as executor:
-            executor.map(cleanup_app, self.apps.values())
+            list(executor.map(cleanup_app, self.apps.values()))

@@ -23,8 +23,8 @@ spec:
         - name: runner
           env:
             - name: PROBLEM_ID
-              value: missing_env_variable_astronomy_shop
+              value: unschedulable_incorrect_port_assignment
             - name: AGENT_NAME
               value: kagent-workload03
             - name: N_ATTEMPTS
-              value: "1"
+              value: "3"

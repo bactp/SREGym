@@ -386,6 +386,25 @@ def driver_loop(
                         LAUNCHER.cleanup_agent(agent_to_run)
                         conductor.results["timed_out"] = True
                         conductor.results["agent_timeout_seconds"] = agent_timeout
+                        # A submission made right as the wall-clock timeout fires can
+                        # still be evaluating in the background (the LLM-judge call
+                        # takes 30-90s); _finish_problem() below tears down the app
+                        # namespace, so it must wait for that evaluation to finish
+                        # first, same as the "agent process exited" branch below does.
+                        # Racing them lets the mitigation oracle read live cluster
+                        # state concurrently with (or after) its own namespace being
+                        # deleted out from under it.
+                        if conductor._submit_future is not None and not conductor._submit_future.done():
+                            console.log("⏳ Waiting for conductor evaluation to complete...")
+                            try:
+                                await asyncio.wait_for(
+                                    asyncio.wrap_future(conductor._submit_future),
+                                    timeout=300,
+                                )
+                            except TimeoutError:
+                                console.log("⚠️  Conductor evaluation did not finish within 300s")
+                            except Exception as e:
+                                console.log(f"⚠️  Conductor evaluation raised: {e}")
                         console.log("🧹 Running conductor cleanup after agent timeout...")
                         conductor._finish_problem()
                         break

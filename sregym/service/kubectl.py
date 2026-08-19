@@ -495,7 +495,14 @@ class KubeCtl:
             logger.error(f"Command output: {e.output}")
 
     def delete_namespace(self, namespace: str):
-        """Delete a specified namespace."""
+        """Delete a specified namespace. Best-effort: never raises, even if
+        the namespace gets stuck Terminating past wait_for_namespace_deletion's
+        timeout (that raises a plain Exception, not an ApiException, so it
+        must be caught here too) -- callers rely on this not raising to run
+        their own cleanup steps after it (job deletion, PV finalizer removal,
+        baseline reconciliation, etc.); previously that plain Exception
+        escaped uncaught and silently skipped every one of those.
+        """
         try:
             self.core_v1_api.delete_namespace(name=namespace)
             self.wait_for_namespace_deletion(namespace)
@@ -505,6 +512,8 @@ class KubeCtl:
                 logger.warning(f"Namespace '{namespace}' not found.")
             else:
                 logger.error(f"Error deleting namespace '{namespace}': {e}")
+        except Exception as e:
+            logger.error(f"Error deleting namespace '{namespace}': {e}")
 
     def gc_orphan_localpv_dirs(
         self,

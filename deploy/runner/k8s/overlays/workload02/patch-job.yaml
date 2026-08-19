@@ -8,23 +8,23 @@ metadata:
   name: sregym-runner
   namespace: sregym-runner
   labels:
-    app.kubernetes.io/instance: sre-test1
+    app.kubernetes.io/instance: workload02
 spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/instance: sre-test1
+        app.kubernetes.io/instance: workload02
     spec:
       volumes:
         - name: target-kubeconfig
           secret:
-            secretName: target-kubeconfig-sre-test1
+            secretName: target-kubeconfig-workload02
       containers:
         - name: runner
           env:
             - name: PROBLEM_ID
-              value: faulty_image_correlated
+              value: incorrect_port_assignment
             - name: AGENT_NAME
-              value: kagent-sre-test1
+              value: kagent-workload02
             - name: N_ATTEMPTS
               value: "3"

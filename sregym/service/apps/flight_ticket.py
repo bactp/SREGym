@@ -40,7 +40,10 @@ class FlightTicket(Application):
         time.sleep(30)
 
     def cleanup(self):
-        Helm.uninstall(**self.helm_configs)
+        try:
+            Helm.uninstall(**self.helm_configs)
+        except Exception as e:
+            self.logger.warning(f"Helm uninstall failed during cleanup for '{self.namespace}': {e}")
         self.kubectl.delete_namespace(self.helm_configs["namespace"])
 
 

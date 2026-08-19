@@ -250,3 +250,6 @@ logs/
 docker/agents/build-context/
 
 resolve-values.yaml
+
+/data_check
+/tests

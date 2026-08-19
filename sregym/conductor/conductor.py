@@ -4,6 +4,7 @@ import json
 import logging
 import shlex
 import shutil
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -87,6 +88,17 @@ class Conductor:
         self.waiting_for_agent: bool = False
         self._evaluating: bool = False  # True while a submission is being evaluated
         self.fault_injected: bool = False
+
+        # Guards every read-then-mutate of waiting_for_agent/_evaluating/
+        # current_stage_index/_pending_submission below, since submit() runs on
+        # the API server's event-loop thread while _submit_evaluate_and_advance
+        # runs in a ThreadPoolExecutor worker thread. A submission that arrives
+        # while the previous stage is still evaluating is queued here (not
+        # discarded) and consumed once that evaluation advances the stage -- see
+        # submit() and _submit_evaluate_and_advance().
+        self._state_lock = threading.Lock()
+        self._pending_submission: str | None = None
+        self._has_pending_submission: bool = False
 
     @property
     def current_problem(self):
@@ -172,6 +184,8 @@ class Conductor:
         self.waiting_for_agent = False
         self._evaluating = False
         self.fault_injected = False
+        self._pending_submission = None
+        self._has_pending_submission = False
 
         if not self.tasklist:
             self.logger.warning("Empty tasklist; no stages configured for this problem.")
@@ -345,14 +359,31 @@ class Conductor:
         # Recover fault using the captured problem reference
         if problem:
             self.logger.info("[CLEANUP] Recovering fault...")
-            problem.recover_fault()
-            self.logger.info("[CLEANUP] Fault recovered")
+            try:
+                problem.recover_fault()
+                self.logger.info("[CLEANUP] Fault recovered")
+            except Exception as e:
+                # Best-effort: an undeployed/half-broken app can leave fault
+                # recovery with nothing valid to act on. Must not skip the
+                # steps below (app undeploy, baseline reconciliation) -- those
+                # are what actually leave the cluster clean for the next run.
+                self.logger.warning(f"Could not recover fault during cleanup: {e}")
 
         # Undeploy app using the captured problem reference
         self.logger.info("[CLEANUP] Undeploying app...")
         if problem:
-            problem.app.cleanup()
-        self.logger.info("[CLEANUP] App undeployed")
+            try:
+                problem.app.cleanup()
+                self.logger.info("[CLEANUP] App undeployed")
+            except Exception as e:
+                # Best-effort: e.g. the app namespace got stuck Terminating
+                # after a failed/partial deploy and didn't clear within
+                # app.cleanup()'s own timeout. Reconciling to baseline below
+                # must still run -- it's what removes shared infra (Prometheus/
+                # Jaeger/Loki in the `observe` namespace, OpenEBS, etc.) added
+                # for this run, and previously never ran at all once this line
+                # raised uncaught.
+                self.logger.warning(f"Could not fully undeploy app during cleanup: {e}")
 
         # Reconcile cluster state to baseline
         if self._baseline_captured:
@@ -375,18 +406,28 @@ class Conductor:
         reconciliation) before returning.
 
         Idempotent: safe to call from multiple paths (submit flow via
-        ``_advance_to_next_stage``, and ``main.py`` as a post-exit safety net).
-        The first call runs cleanup; subsequent calls no-op. ``start_problem()``
-        resets the stage to ``"setup"``, so the deploy-retry path still cleans up
-        each failed attempt.
+        ``_advance_to_next_stage`` in a background executor thread, and
+        ``main.py`` as a post-exit safety net on the main driver thread/loop --
+        those two can race). The first call runs cleanup; subsequent calls
+        no-op. ``start_problem()`` resets the stage to ``"setup"``, so the
+        deploy-retry path still cleans up each failed attempt.
+
+        The check-and-set of ``submission_stage`` is done under
+        ``_state_lock`` so two concurrent callers can't both pass the
+        "not already tearing down" check and both run ``_cleanup_sync()`` at
+        once; only the flag transition is locked, not the cleanup itself, so
+        a slow cleanup doesn't block ``submit()``'s fast-path checks for
+        unrelated stages.
         """
-        if self.submission_stage in ("done", "tearing_down"):
-            self.logger.info(
-                f"[STAGE] _finish_problem already ran/running (submission_stage={self.submission_stage!r}); skipping"
-            )
-            return
+        with self._state_lock:
+            if self.submission_stage in ("done", "tearing_down"):
+                self.logger.info(
+                    f"[STAGE] _finish_problem already ran/running (submission_stage={self.submission_stage!r}); skipping"
+                )
+                return
+            self.submission_stage = "tearing_down"
+
         self.logger.info("[STAGE] Done, starting teardown")
-        self.submission_stage = "tearing_down"
         self._cleanup_sync()
         self.logger.info("[STAGE] Teardown complete")
 
@@ -483,49 +524,86 @@ class Conductor:
         """
         Blocking work for a submission: evaluate the oracle, advance stage, manage noise.
         Runs in a background thread so the HTTP response is not blocked.
+
+        Loops rather than returning after one stage: if a submission for the
+        next stage was queued by submit() while THIS stage was evaluating (the
+        agent moved on faster than the LLM-judge finished), it is consumed here
+        immediately, under the same lock submit() uses, so it gets evaluated
+        against the stage it actually advanced to instead of being lost.
         """
-        stage_name: str = current_stage["name"]
-        self.logger.info(f"Evaluating stage '{stage_name}'", extra={"sol": sol})
+        while True:
+            stage_name: str = current_stage["name"]
+            self.logger.info(f"Evaluating stage '{stage_name}'", extra={"sol": sol})
 
-        # Stop noise before evaluation to ensure clean environment
-        if self.config.enable_noise:
+            # Stop noise before evaluation to ensure clean environment
+            if self.config.enable_noise:
+                try:
+                    nm = get_noise_manager()
+                    self.logger.info("Stopping noise manager before evaluation...")
+                    nm.stop()
+                except Exception as e:
+                    self.logger.warning(f"Failed to stop noise manager: {e}")
+
             try:
-                nm = get_noise_manager()
-                self.logger.info("Stopping noise manager before evaluation...")
-                nm.stop()
-            except Exception as e:
-                self.logger.warning(f"Failed to stop noise manager: {e}")
+                # Run the evaluation function for the current stage. The per-stage
+                # _evaluate_* methods catch their own oracle exceptions and record
+                # a failure result; this outer guard is defense in depth so the
+                # stage always advances even if something above the oracle blows up.
+                try:
+                    current_stage["evaluation"](sol)
+                except Exception:
+                    self.logger.exception(
+                        f"Stage '{stage_name}' evaluation raised unexpectedly; advancing anyway "
+                        "so the conductor doesn't get stuck waiting on a dead stage."
+                    )
+                    self.results.setdefault(
+                        stage_name.capitalize(),
+                        {"success": False, "error": "stage evaluation raised", "submission": sol},
+                    )
+            finally:
+                with self._state_lock:
+                    self._evaluating = False
 
-        try:
-            # Run the evaluation function for the current stage. The per-stage
-            # _evaluate_* methods catch their own oracle exceptions and record
-            # a failure result; this outer guard is defense in depth so the
-            # stage always advances even if something above the oracle blows up.
-            try:
-                current_stage["evaluation"](sol)
-            except Exception:
-                self.logger.exception(
-                    f"Stage '{stage_name}' evaluation raised unexpectedly; advancing anyway "
-                    "so the conductor doesn't get stuck waiting on a dead stage."
-                )
-                self.results.setdefault(
-                    stage_name.capitalize(), {"success": False, "error": "stage evaluation raised", "submission": sol}
-                )
-        finally:
-            self._evaluating = False
+            # After evaluation, advance to the next stage (if any)
+            next_index = self.current_stage_index + 1
+            self._advance_to_next_stage(start_index=next_index)
 
-        # After evaluation, advance to the next stage (if any)
-        next_index = self.current_stage_index + 1
-        self._advance_to_next_stage(start_index=next_index)
+            # Restart noise if there are more stages AND not in teardown
+            if self.config.enable_noise and self.submission_stage not in ("done", "tearing_down"):
+                try:
+                    nm = get_noise_manager()
+                    self.logger.info("Restarting noise manager for next stage...")
+                    nm.start()
+                except Exception as e:
+                    self.logger.warning(f"Failed to restart noise manager: {e}")
 
-        # Restart noise if there are more stages AND not in teardown
-        if self.config.enable_noise and self.submission_stage not in ("done", "tearing_down"):
-            try:
-                nm = get_noise_manager()
-                self.logger.info("Restarting noise manager for next stage...")
-                nm.start()
-            except Exception as e:
-                self.logger.warning(f"Failed to restart noise manager: {e}")
+            # Consume a submission that arrived (and was queued by submit())
+            # while this stage was still evaluating. Only proceed if advancing
+            # actually reached a real next stage that's waiting for a submission
+            # -- otherwise (problem finished/tearing down) there's nothing left
+            # to evaluate the queued submission against.
+            with self._state_lock:
+                if not self._has_pending_submission:
+                    return
+                if self.submission_stage in ("done", "tearing_down") or not self.waiting_for_agent:
+                    self.logger.warning(
+                        "A submission was queued during evaluation but the problem already "
+                        f"finished (submission_stage={self.submission_stage!r}); dropping it."
+                    )
+                    self._pending_submission = None
+                    self._has_pending_submission = False
+                    return
+                sol = self._pending_submission
+                self._pending_submission = None
+                self._has_pending_submission = False
+                self.waiting_for_agent = False
+                self._evaluating = True
+                current_stage = self.stage_sequence[self.current_stage_index]
+
+            self.logger.info(
+                "Consuming a submission that was queued during the previous stage's "
+                f"evaluation, now evaluating it against stage '{current_stage['name']}'."
+            )
 
     async def submit(self, solution: str | None) -> dict:
         """
@@ -534,38 +612,59 @@ class Conductor:
         """
         sol = solution
 
-        # If all tasks are already completed, simply return the final snapshot.
-        if self.submission_stage == "done":
-            self.logger.info("All tasks already completed; ignoring new submission.")
-            return dict(self.results)
+        with self._state_lock:
+            # If all tasks are already completed, simply return the final snapshot.
+            if self.submission_stage == "done":
+                self.logger.info("All tasks already completed; ignoring new submission.")
+                return dict(self.results)
 
-        # If teardown is in progress, return current results without evaluation
-        if self.submission_stage == "tearing_down":
-            self.logger.info("Teardown in progress; returning current results without evaluation.")
-            return dict(self.results)
+            # If teardown is in progress, return current results without evaluation
+            if self.submission_stage == "tearing_down":
+                self.logger.info("Teardown in progress; returning current results without evaluation.")
+                return dict(self.results)
 
-        if not self.stage_sequence:
-            self.logger.warning("submit() called but no stages are configured; returning current results.")
-            return dict(self.results)
+            if not self.stage_sequence:
+                self.logger.warning("submit() called but no stages are configured; returning current results.")
+                return dict(self.results)
 
-        if not self.waiting_for_agent:
-            if self._evaluating:
-                self.logger.info(
-                    "submit() called while evaluation is already in progress for "
-                    f"stage '{self.submission_stage}'. Submission was already accepted."
+            if not self.waiting_for_agent:
+                if self._evaluating:
+                    # A genuinely new submission can legitimately arrive here: the
+                    # agent submitted for the current stage, got acknowledged, and
+                    # immediately continued on to the next stage (e.g. applying a
+                    # fix and submitting mitigation) faster than this stage's
+                    # (async, LLM-judge-backed) evaluation finished. Queuing it
+                    # instead of discarding it is what lets
+                    # _submit_evaluate_and_advance() apply it to the next stage
+                    # once this one's evaluation actually advances the stage. Only
+                    # the most recent queued submission is kept, matching the
+                    # existing "duplicate submit gets one ack" behavior for a
+                    # true retry of the same stage.
+                    self._pending_submission = sol
+                    self._has_pending_submission = True
+                    self.logger.info(
+                        "submit() called while evaluation is already in progress for "
+                        f"stage '{self.submission_stage}'. Queuing this submission to be "
+                        "evaluated once the current stage's evaluation completes."
+                    )
+                    return {
+                        "status": "ok",
+                        "message": (
+                            "Submission received; evaluation for the current stage is still "
+                            "in progress. This submission is queued and will be evaluated once ready."
+                        ),
+                    }
+                self.logger.error(
+                    "submit() called when conductor is not waiting for a submission. "
+                    f"Current submission_stage={self.submission_stage}"
                 )
-                return {"status": "ok", "message": "Submission already accepted; evaluation in progress."}
-            self.logger.error(
-                "submit() called when conductor is not waiting for a submission. "
-                f"Current submission_stage={self.submission_stage}"
-            )
-            raise RuntimeError("Conductor is not currently waiting for an agent submission.")
+                raise RuntimeError("Conductor is not currently waiting for an agent submission.")
 
-        current_stage = self.stage_sequence[self.current_stage_index]
+            current_stage = self.stage_sequence[self.current_stage_index]
 
-        # Mark that we're no longer waiting so duplicate submits are rejected
-        self.waiting_for_agent = False
-        self._evaluating = True
+            # Mark that we're no longer waiting so duplicate submits are rejected
+            self.waiting_for_agent = False
+            self._evaluating = True
 
         # Run evaluation and stage advancement in an executor thread so the HTTP
         # response returns immediately.  Store the future so start_problem() can
@@ -717,17 +816,31 @@ class Conductor:
         self.logger.info("Fixing Kubernetes... to normal state.")
         self.logger.info("[FIX] Imbalance leftover if any")
 
-        injector = VirtualizationFaultInjector(namespace="kube-system")
-        injector.recover_daemon_set_image_replacement(
-            daemon_set_name="kube-proxy", original_image="registry.k8s.io/kube-proxy:v1.31.13"
-        )
+        try:
+            injector = VirtualizationFaultInjector(namespace="kube-system")
+            injector.recover_daemon_set_image_replacement(
+                daemon_set_name="kube-proxy", original_image="registry.k8s.io/kube-proxy:v1.31.13"
+            )
+        except Exception as e:
+            self.logger.warning(f"Could not fix leftover kube-proxy image state: {e}")
 
         self.logger.info("[FIX] KubeletCrash leftover if any")
         injector = RemoteOSFaultInjector()
-        injector.recover_kubelet_crash()
+        try:
+            injector.recover_kubelet_crash()
+        except Exception as e:
+            # Best-effort: this SSHes to worker nodes via scripts/ansible/inventory.yml,
+            # which isn't reachable/populated from every runner environment (e.g. the
+            # containerized multi-cluster Job runner - see docs/parallel-runner-guide.md).
+            # A leftover-recovery step failing must not abort an otherwise-unrelated
+            # problem run, same as every other fix below.
+            self.logger.warning(f"Could not fix leftover kubelet-crash state: {e}")
 
         self.logger.info("[FIX] KubeletEvictionThresholdMisconfig leftover if any")
-        injector.recover_disk_pressure_all()
+        try:
+            injector.recover_disk_pressure_all()
+        except Exception as e:
+            self.logger.warning(f"Could not fix leftover disk-pressure state: {e}")
         # Delete Failed pods left by the eviction loop. Skip the app namespace
         # because undeploy_app() tears down the application namespace anyway.
         from sregym.conductor.problems.kubelet_eviction_threshold_misconfig import KubeletEvictionThresholdMisconfig

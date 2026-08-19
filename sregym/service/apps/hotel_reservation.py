@@ -139,7 +139,15 @@ class HotelReservation(Application):
         """Delete the entire namespace for the hotel reservation application."""
         self.kubectl.delete_namespace(self.namespace)
 
-        self.kubectl.wait_for_namespace_deletion(self.namespace)
+        # delete_namespace() already waited internally (and logs/swallows a
+        # timeout rather than raising); this second explicit wait is
+        # redundant confirmation, not a new attempt, so a real still-stuck
+        # namespace here must not skip the PV-finalizer cleanup and job
+        # deletion below -- those still need to run regardless.
+        try:
+            self.kubectl.wait_for_namespace_deletion(self.namespace)
+        except Exception as e:
+            logger.warning(f"Namespace '{self.namespace}' still not deleted after cleanup wait: {e}")
         pvs = self.kubectl.exec_command(
             "kubectl get pv --no-headers | grep 'hotel-reservation' | awk '{print $1}'"
         ).splitlines()

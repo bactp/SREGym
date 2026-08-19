@@ -318,7 +318,13 @@ class ClusterStateManager:
             if _is_chaos_mesh_resource(crd):
                 continue
             logger.info(f"Deleting unexpected CRD: {crd}")
-            self._strip_cr_finalizers(crd)
+            try:
+                self._strip_cr_finalizers(crd)
+            except Exception as e:
+                # Best-effort: a malformed CR (e.g. missing metadata.name)
+                # must not abort this loop or skip steps 7-11 below (webhook
+                # cleanup, node label/taint reset, CoreDNS reset).
+                logger.warning(f"Failed to strip finalizers from CRs of {crd}: {e}")
             try:
                 self.apiextensions_v1.delete_custom_resource_definition(name=crd)
                 changes["crds_deleted"].append(crd)
