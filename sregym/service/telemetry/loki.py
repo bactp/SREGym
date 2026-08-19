@@ -19,6 +19,7 @@ class Loki:
         self.promtail_release_name = "promtail"
         self.promtail_values_file = str(BASE_DIR / "observer/loki/promtail-values.yaml")
         self.pvc_config_file = None
+        self._grafana_repo_dir = BASE_PARENT_DIR / "helm-repos" / "grafana"
 
         self.logger = logging.getLogger("all.infra.loki")
         self.logger.propagate = True
@@ -91,8 +92,8 @@ class Loki:
         self._delete_pvc()
         Helm.uninstall(**self.helm_configs)
 
-        # Add Grafana Helm repo for Loki chart
-        self._add_grafana_helm_repo()
+        # Point at the vendored local chart, or add the live Grafana repo.
+        self._resolve_loki_chart_source()
 
         if self.pvc_config_file:
             pvc_name = self._get_pvc_name_from_file(self.pvc_config_file)
@@ -103,23 +104,29 @@ class Loki:
         Helm.assert_if_deployed(self.namespace)
         self._deploy_promtail()
 
-    def _add_grafana_helm_repo(self):
-        """Add Grafana Helm repository for Loki chart.
+    def _resolve_loki_chart_source(self):
+        """Point Loki's chart_path at the pinned local chart, or fall back
+        to the live Grafana Helm repo.
 
-        Points at a local file:// repo baked into the runner image (see
-        deploy/runner/Dockerfile) instead of the live
-        https://grafana.github.io/helm-charts URL: that index.yaml is large
-        enough to routinely exceed helm's fetch timeout, which silently
-        breaks Loki/Promtail deploy for every problem, not just ones that
-        happen to touch Grafana directly.
+        Helm 3 has no protocol handler for `file://` repos ("could not find
+        protocol handler for: file"), so a local repo added that way always
+        fails `helm install` with "repo grafana not found" — silently
+        breaking Loki/Promtail deploy for every problem, not just ones that
+        happen to touch Grafana directly. Referencing the vendored .tgz (see
+        deploy/runner/Dockerfile) directly as chart_path sidesteps `helm repo
+        add` entirely, since `helm install` can install straight from a
+        local chart archive with no repo involved.
         """
-        self.logger.info("Adding Grafana Helm repository...")
-        grafana_repo_dir = BASE_PARENT_DIR / "helm-repos" / "grafana"
+        vendored_chart = self._grafana_repo_dir / "loki-7.3.0.tgz"
+        if vendored_chart.is_file():
+            self.helm_configs["chart_path"] = str(vendored_chart)
+            return
+
         # Outside the runner image (e.g. a dev running main.py directly) the
-        # vendored repo won't exist, so fall back to the live URL there.
-        repo_url = f"file://{grafana_repo_dir}" if grafana_repo_dir.is_dir() else "https://grafana.github.io/helm-charts"
+        # vendored chart won't exist, so fall back to the live repo.
+        self.logger.info("Adding Grafana Helm repository...")
         try:
-            KubeCtl().exec_command(f"helm repo add grafana {repo_url}")
+            KubeCtl().exec_command("helm repo add grafana https://grafana.github.io/helm-charts")
             KubeCtl().exec_command("helm repo update")
         except Exception as e:
             self.logger.warning(f"Failed to add Grafana Helm repo (may already exist): {e}")
@@ -183,9 +190,11 @@ class Loki:
             return
 
         self.logger.info("Deploying Promtail for Loki log collection...")
+        vendored_chart = self._grafana_repo_dir / "promtail-6.16.6.tgz"
+        promtail_chart_path = str(vendored_chart) if vendored_chart.is_file() else "grafana/promtail"
         Helm.install(
             release_name=self.promtail_release_name,
-            chart_path="grafana/promtail",
+            chart_path=promtail_chart_path,
             namespace=self.namespace,
             remote_chart=True,
             extra_args=["-f", self.promtail_values_file],

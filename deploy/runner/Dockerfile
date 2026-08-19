@@ -145,21 +145,21 @@ RUN mkdir -p SREGym-applications/astronomy-shop/charts/opentelemetry-demo/charts
     && curl -fL --retry 5 --retry-delay 5 -o opensearch-3.4.0.tgz \
         "https://github.com/opensearch-project/helm-charts/releases/download/opensearch-3.4.0/opensearch-3.4.0.tgz"
 
-# sregym/service/telemetry/loki.py runs `helm repo add grafana
+# sregym/service/telemetry/loki.py used to run `helm repo add grafana
 # https://grafana.github.io/helm-charts` on every problem run (Loki/Promtail
 # are deployed for every problem, not just astronomy-shop ones) — same
-# huge/slow index.yaml problem as above, but it's swallowed by a bare
-# `except Exception` there, so it fails silently and Loki/Promtail never
-# install. Bake a local file-based Helm repo with the pinned chart versions
-# so that call never touches the network; loki.py points "grafana" at this
-# path instead of the live URL (see helm-repos-comment there).
+# huge/slow index.yaml problem as above, but it was swallowed by a bare
+# `except Exception` there, so it failed silently and Loki/Promtail never
+# installed. Bake the pinned charts in here so loki.py can reference the
+# .tgz files directly as chart_path with no `helm repo add` involved (Helm 3
+# has no protocol handler for a local file:// repo, so that route never
+# worked either — see the loki.py comment there).
 RUN mkdir -p helm-repos/grafana \
     && cd helm-repos/grafana \
     && curl -fL --retry 5 --retry-delay 5 -o loki-7.3.0.tgz \
         "https://github.com/grafana/helm-charts/releases/download/helm-loki-7.3.0/loki-7.3.0.tgz" \
     && curl -fL --retry 5 --retry-delay 5 -o promtail-6.16.6.tgz \
-        "https://github.com/grafana/helm-charts/releases/download/promtail-6.16.6/promtail-6.16.6.tgz" \
-    && helm repo index .
+        "https://github.com/grafana/helm-charts/releases/download/promtail-6.16.6/promtail-6.16.6.tgz"
 
 ENV PATH="/opt/app/.venv/bin:$PATH"
 ENV PYTHONPATH=/opt/app
