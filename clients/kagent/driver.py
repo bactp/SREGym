@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -205,14 +206,51 @@ def save_invocation_result(logs_dir: Path, problem_id: str, result: dict | str) 
     return out_path
 
 
+def _track_pending_tool_calls(ndjson_line: str, pending: set[str]) -> None:
+    """Update ``pending`` (call ids awaiting a response) from one ``--stream`` NDJSON
+    line. Mirrors the ``status-update``/``message``/``parts`` shape that
+    ``_reconstruct_history_from_stream`` parses -- a part with ``name``+``args``+``id``
+    and no ``response`` is a function call; a part with a matching ``id``+``response``
+    resolves it."""
+    try:
+        event = json.loads(ndjson_line)
+    except json.JSONDecodeError:
+        return
+    if event.get("kind") != "status-update":
+        return
+    message = (event.get("status") or {}).get("message") or {}
+    for part in message.get("parts", []):
+        if part.get("kind") != "data":
+            continue
+        data = part.get("data", {})
+        call_id = data.get("id")
+        if not call_id:
+            continue
+        if "response" in data:
+            pending.discard(call_id)
+        elif "name" in data and "args" in data:
+            pending.add(call_id)
+
+
 def invoke_kagent(
     agent: str,
     namespace: str,
     kagent_url: str,
     task: str,
     timeout_seconds: int,
-) -> tuple[int, str, str]:
-    """Shell out to `kagent invoke`. Returns (returncode, stdout, stderr)."""
+    idle_timeout_seconds: int = 90,
+) -> tuple[int, str, str, bool]:
+    """Shell out to `kagent invoke --stream`, reading its NDJSON output line by line.
+
+    Returns (returncode, stdout, stderr, truncated). ``truncated`` is True when the
+    stream ends - whether the process exits on its own (even with returncode 0) or
+    goes idle past ``idle_timeout_seconds`` - while a tool call is still awaiting its
+    response. kagent-controller has been observed to end a task early (e.g. hitting a
+    RemoteMCPServer's own timeout mid tool-call) and still report the invoke as a
+    normal completion; catching that here lets main() retry immediately instead of
+    relying on wait_for_run_done()'s much longer timeout to notice nothing was ever
+    submitted.
+    """
     command = [
         "kagent",
         "invoke",
@@ -231,13 +269,55 @@ def invoke_kagent(
         "--stream",
     ]
     logger.info(f"Invoking kagent agent '{agent}' (timeout={timeout_seconds}s)...")
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=timeout_seconds + 30,
-    )
-    return result.returncode, result.stdout, result.stderr
+
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+
+    lines: list[str] = []
+    stderr_chunks: list[str] = []
+    pending_calls: set[str] = set()
+    last_line_time = time.time()
+
+    def _read_stdout() -> None:
+        nonlocal last_line_time
+        for raw_line in process.stdout:
+            last_line_time = time.time()
+            line = raw_line.rstrip("\n")
+            lines.append(line)
+            _track_pending_tool_calls(line, pending_calls)
+
+    def _read_stderr() -> None:
+        for raw_line in process.stderr:
+            stderr_chunks.append(raw_line)
+
+    stdout_thread = threading.Thread(target=_read_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
+    deadline = time.time() + timeout_seconds + 30
+    killed_reason = None
+    while stdout_thread.is_alive():
+        stdout_thread.join(timeout=1)
+        now = time.time()
+        if now > deadline:
+            killed_reason = f"exceeded overall timeout of {timeout_seconds + 30}s"
+            break
+        if pending_calls and (now - last_line_time) > idle_timeout_seconds:
+            killed_reason = f"stalled {idle_timeout_seconds}s with pending tool call(s) {pending_calls}"
+            break
+
+    if killed_reason:
+        logger.warning(f"kagent invoke {killed_reason}; killing subprocess")
+        process.kill()
+
+    stdout_thread.join(timeout=10)
+    stderr_thread.join(timeout=10)
+    returncode = process.wait(timeout=10)
+
+    stdout = "\n".join(lines)
+    stderr = "".join(stderr_chunks)
+    truncated = bool(pending_calls) or killed_reason is not None
+    return returncode, stdout, stderr, truncated
 
 
 def main():
@@ -246,6 +326,12 @@ def main():
     parser.add_argument("--kagent-namespace", default=os.environ.get("KAGENT_NAMESPACE", "kagent"))
     parser.add_argument("--kagent-port", type=int, default=int(os.environ.get("KAGENT_CONTROLLER_PORT", "8083")))
     parser.add_argument("--invoke-timeout", type=int, default=int(os.environ.get("KAGENT_INVOKE_TIMEOUT", "3600")))
+    parser.add_argument(
+        "--invoke-retries",
+        type=int,
+        default=int(os.environ.get("KAGENT_INVOKE_RETRIES", "1")),
+        help="Extra attempts if kagent invoke's stream ends on an unanswered tool call.",
+    )
     parser.add_argument("--done-wait-timeout", type=int, default=120)
     parser.add_argument(
         "--logs-dir", type=str, default=os.environ.get("AGENT_LOGS_DIR", "./logs/kagent")
@@ -285,30 +371,46 @@ def main():
     instruction = build_instruction(app_info)
 
     logs_dir = Path(args.logs_dir)
-    try:
-        returncode, stdout, stderr = invoke_kagent(
-            agent=args.kagent_agent,
-            namespace=args.kagent_namespace,
-            kagent_url=kagent_url,
-            task=instruction,
-            timeout_seconds=args.invoke_timeout,
-        )
-    except subprocess.TimeoutExpired:
-        logger.error("kagent invoke subprocess timed out")
-        returncode, stdout, stderr = 1, "", "subprocess timeout"
-
-    if returncode != 0:
-        logger.warning(f"kagent invoke exited with code {returncode}. stderr: {stderr[:2000]}")
-
-    parsed_result = _reconstruct_history_from_stream(stdout)
-    if parsed_result is None:
+    max_attempts = args.invoke_retries + 1
+    returncode, parsed_result = 1, None
+    for attempt in range(1, max_attempts + 1):
         try:
-            parsed_result = json.loads(stdout)
-        except json.JSONDecodeError:
-            logger.warning("Could not parse kagent invoke output as NDJSON stream or plain JSON, saving raw text instead")
-            parsed_result = stdout
+            returncode, stdout, stderr, truncated = invoke_kagent(
+                agent=args.kagent_agent,
+                namespace=args.kagent_namespace,
+                kagent_url=kagent_url,
+                task=instruction,
+                timeout_seconds=args.invoke_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error("kagent invoke subprocess timed out")
+            returncode, stdout, stderr, truncated = 1, "", "subprocess timeout", True
 
-    save_invocation_result(logs_dir, problem_id, parsed_result if isinstance(parsed_result, dict) else stdout)
+        if returncode != 0:
+            logger.warning(f"kagent invoke exited with code {returncode}. stderr: {stderr[:2000]}")
+
+        parsed_result = _reconstruct_history_from_stream(stdout)
+        if parsed_result is None:
+            try:
+                parsed_result = json.loads(stdout)
+            except json.JSONDecodeError:
+                logger.warning("Could not parse kagent invoke output as NDJSON stream or plain JSON, saving raw text instead")
+                parsed_result = stdout
+
+        result_label = problem_id if attempt == 1 else f"{problem_id}_attempt{attempt}"
+        save_invocation_result(logs_dir, result_label, parsed_result if isinstance(parsed_result, dict) else stdout)
+
+        if not truncated:
+            break
+        if attempt < max_attempts:
+            logger.warning(
+                f"kagent invoke result ended on an unanswered tool call (attempt {attempt}/{max_attempts}); retrying..."
+            )
+        else:
+            logger.error(
+                f"kagent invoke result still truncated after {max_attempts} attempt(s); "
+                "giving up and letting conductor's stage-timeout report the run as incomplete"
+            )
 
     final_stage = wait_for_run_done(timeout=args.done_wait_timeout)
 

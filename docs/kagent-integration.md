@@ -184,7 +184,7 @@ spec:
   description: SREGym kubectl-exec MCP tool server (target cluster access)
   protocol: SSE
   url: http://<mgmt-node-ip>:9954/kubectl/sse
-  timeout: 30s
+  timeout: 60s
   sseReadTimeout: 1h
 ---
 apiVersion: kagent.dev/v1alpha2
@@ -196,7 +196,7 @@ spec:
   description: SREGym Prometheus metrics MCP tool server
   protocol: SSE
   url: http://<mgmt-node-ip>:9954/prometheus/sse
-  timeout: 30s
+  timeout: 60s
   sseReadTimeout: 1h
 ---
 apiVersion: kagent.dev/v1alpha2
@@ -208,7 +208,7 @@ spec:
   description: SREGym Jaeger tracing MCP tool server
   protocol: SSE
   url: http://<mgmt-node-ip>:9954/jaeger/sse
-  timeout: 30s
+  timeout: 60s
   sseReadTimeout: 1h
 ---
 apiVersion: kagent.dev/v1alpha2
@@ -220,7 +220,7 @@ spec:
   description: SREGym conductor submit MCP tool (diagnosis/mitigation submission)
   protocol: SSE
   url: http://<mgmt-node-ip>:8000/submit_mcp/sse
-  timeout: 30s
+  timeout: 60s
   sseReadTimeout: 1h
 EOF
 ```
