@@ -101,16 +101,6 @@ agents:
     install_script: null
     agent_version: null
     container_isolation: false
-  - name: kagent-workload03
-    kickoff_command: python -m clients.kagent.driver --done-wait-timeout 900
-    kickoff_workdir: .
-    kickoff_env:
-      KAGENT_KUBECONFIG: /home/ubuntu/mgmt.kubeconfig
-      KAGENT_AGENT_NAME: sre-agent-workload03
-      KAGENT_NAMESPACE: kagent
-    install_script: null
-    agent_version: null
-    container_isolation: false
   - name: kagent-workload01
     kickoff_command: python -m clients.kagent.driver --done-wait-timeout 900
     kickoff_workdir: .
