@@ -1,6 +1,7 @@
 from fastmcp import FastMCP
 
 from clients.stratus.stratus_utils.get_logger import get_logger
+from mcp_server.kubectl_server_helper.utils import parse_text
 from mcp_server.utils import ObservabilityClient
 
 logger = get_logger()
@@ -35,7 +36,7 @@ def get_metrics(query: str) -> str:
         metrics = str(response.json()["data"])
         result = metrics if metrics else "None"
 
-        return result
+        return parse_text(result)
     except Exception as e:
         err_str = f"[prom_mcp] Error querying get_metrics: {str(e)}"
         logger.error(err_str)

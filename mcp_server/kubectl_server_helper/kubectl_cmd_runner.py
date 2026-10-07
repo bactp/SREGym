@@ -19,6 +19,21 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("all.mcp.kubectl_cmd_runner")
 
 
+_POD_NOT_READY_STDERR_MARKERS = (
+    "copying std",  # client-go remotecommand executor log line when the stream breaks mid-exec
+    "unable to upgrade connection",
+    "is waiting to start",
+    "container not found",
+)
+
+
+def _looks_like_pod_not_ready(command: str, stderr: str) -> bool:
+    if not (command.strip().startswith("kubectl exec") or command.strip().startswith("kubectl logs")):
+        return False
+    stderr_lower = stderr.lower()
+    return any(marker in stderr_lower for marker in _POD_NOT_READY_STDERR_MARKERS)
+
+
 class KubectlCmdRunner:
     def __init__(self, config: KubectlToolCfg, action_stack=None):
         self.action_stack = action_stack
@@ -179,7 +194,14 @@ class KubectlCmdRunner:
                 return output if output else "Command completed with no output"
 
             logger.warning(f"Error executing kubectl command:\n{result.stderr}")
-            raise RuntimeError(f"Error executing kubectl command:\n{result.stderr}")
+            hint = ""
+            if _looks_like_pod_not_ready(command, result.stderr):
+                hint = (
+                    "\nHint: this looks like the target pod/container wasn't Running yet when the "
+                    "stream was opened (common right after `kubectl run`). Check `kubectl get pod "
+                    "<name>` first instead of retrying exec/logs blindly."
+                )
+            raise RuntimeError(f"Error executing kubectl command:\n{result.stderr}{hint}")
 
     def _gen_rollback_commands(self, command: str, dry_run_result: DryRunResult) -> RollbackNode:
         """Generate rollback commands based on the dry-run result."""

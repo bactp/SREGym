@@ -1,0 +1,63 @@
+# APPLIED ON THE SRE CLUSTER (sre-control, 192.168.28.158), not on gpu-4.
+#
+#   kubectl -n kagent create secret generic llmd-selfhosted \
+#     --from-literal=LLMD_API_KEY='<the key printed by 20-base/make-secret.sh>'
+#   kubectl apply -f modelconfigs.yaml
+#
+# TWO ModelConfigs, ONE key, ONE endpoint.
+#
+# Why two objects for one endpoint: `model` is a field of ModelConfig, not something an
+# agent puts in a request. This mirrors what the cluster already does - sre-agent-model
+# (gpt-5-mini) and sre-agent-model-gpt5 (gpt-5) share secret kagent-openai and differ only
+# in `model`. Switching an agent between arms means pointing it at the other ModelConfig.
+#
+# Why provider: OpenAI and not something self-hosted: the CRD's provider enum is
+# Anthropic | OpenAI | AzureOpenAI | Ollama | Gemini | GeminiVertexAI | AnthropicVertexAI.
+# There is no self-hosted provider. An OpenAI-compatible server is `OpenAI` plus
+# spec.openAI.baseUrl. (Ollama's `host` field exists but our server is vLLM, not Ollama.)
+#
+# v4, NOT v3. v3 was trained on targets whose tool-call `arguments` were a JSON *string*,
+# so it emits a doubly-encoded arguments field and every kagent tool call dies with
+#   FunctionCall args: Input should be a valid dictionary ... input_type=str
+# The version stays in the model name on purpose: the response echoes `model` back, so every
+# episode records which adapter version actually served it. Delete the old ModelConfig after
+# applying this one:
+#   kubectl -n kagent delete modelconfig qwen7b-sregym-v3-model
+#
+# THE TWO openAI BLOCKS MUST BE IDENTICAL APART FROM `model`. If temperature, seed or
+# maxCompletionTokens differ between the arms, the measured difference is no longer the
+# adapter. temperature 0 + a fixed seed also makes the runs reproducible.
+---
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: qwen7b-base-model
+  namespace: kagent
+spec:
+  provider: OpenAI
+  model: qwen7b-base            # control arm: base Qwen2.5-7B-Instruct
+  apiKeySecret: llmd-selfhosted
+  apiKeySecretKey: LLMD_API_KEY
+  openAI:
+    baseUrl: http://192.168.24.21:30810/v1
+    temperature: "0"
+    seed: 0
+    maxCompletionTokens: 2048
+    timeout: 300                # matches the HTTPRoute requestTimeout of 300s
+---
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: qwen7b-sregym-v4-model
+  namespace: kagent
+spec:
+  provider: OpenAI
+  model: qwen7b-sregym-v4       # treatment arm: same weights + the SREGym LoRA adapter
+  apiKeySecret: llmd-selfhosted
+  apiKeySecretKey: LLMD_API_KEY
+  openAI:
+    baseUrl: http://192.168.24.21:30810/v1
+    temperature: "0"
+    seed: 0
+    maxCompletionTokens: 2048
+    timeout: 300

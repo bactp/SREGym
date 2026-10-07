@@ -17,5 +17,5 @@ commonLabels:
 
 images:
   - name: sregym
-    newName: ghcr.io/sregym/sregym-mcp
+    newName: phuongbac/sregym-mcp
     newTag: latest

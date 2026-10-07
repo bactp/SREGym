@@ -6,18 +6,29 @@ Unlike the CLI-based drivers (codex/claudecode/opencode), the actual agent doesn
 in this process or even on this host: it runs as a kagent Agent CRD on a separate
 management cluster, wired up (via RemoteMCPServer CRDs) to SREGym's own kubectl/
 prometheus/jaeger/submit MCP tool servers. This driver's job is just to kick off a
-`kagent invoke` call with the task instructions and wait for the conductor to report
-the run as done.
+task on it and wait for the conductor to report the run as done.
+
+Talks to kagent-controller's A2A endpoint (``POST /api/a2a/<namespace>/<agent>/``,
+JSON-RPC 2.0 ``message/stream``) directly over HTTP instead of shelling out to the
+`kagent` CLI's `invoke` command. Two bugs in that CLI (present through at least
+v0.10.0-rc1, both still open upstream) make it unsuitable as of this writing:
+  - Every error path in `invoke` prints to stderr and does a bare `return`, never
+    `os.Exit(1)` - so a failed invoke still reports exit code 0 to a caller checking
+    returncode (`go/core/cli/internal/cli/agent/invoke.go`).
+  - Both `invoke --stream` and non-streaming `invoke` wrap the actual A2A call in a
+    hardcoded `context.WithTimeout(ctx, 300*time.Second)` that silently caps
+    `--timeout` at 300s no matter what value is passed (same file).
+The wire format itself (JSON-RPC 2.0 over SSE) was captured directly off a real
+`kagent invoke --stream` run via a local proxy, not guessed from the spec.
 """
 
 import argparse
 import json
 import logging
 import os
-import subprocess
 import sys
-import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -121,17 +132,18 @@ Follow the DIAGNOSIS then MITIGATION workflow and submission rules from your sys
 Work autonomously from here - do not ask for confirmation."""
 
 
-def _reconstruct_history_from_stream(stdout: str) -> dict | None:
-    """Reassemble a non-streaming-shaped ``{"history": [...]}`` result from ``--stream``
-    NDJSON output, so the existing ATIF adapter (``atif_converter/adapters/kagent.py``,
-    which expects the single-shot ``kagent invoke`` response shape) can still convert it
-    and populate ``Metrics.*``.
+def _reconstruct_history_from_events(events: list[dict]) -> dict | None:
+    """Reassemble a non-streaming-shaped ``{"history": [...]}`` result from a sequence of
+    parsed A2A ``message/stream`` events (the ``result`` field of each SSE frame's JSON-RPC
+    envelope), so the existing ATIF adapter (``atif_converter/adapters/kagent.py``, which
+    expects the single-shot ``kagent invoke`` response shape) can still convert it and
+    populate ``Metrics.*``.
 
-    Each NDJSON line is one event. A ``status-update`` event's ``status.message`` is one
-    A2A history item (``role``/``parts``/``metadata`` incl. per-turn
-    ``kagent_usage_metadata``) - the same shape a non-streaming ``history[]`` entry has.
-    The message just before a terminal state is re-emitted verbatim in the final event too,
-    so dedupe by ``messageId`` (keep the first occurrence).
+    A ``status-update`` event's ``status.message`` is one A2A history item
+    (``role``/``parts``/``metadata`` incl. per-turn ``kagent_usage_metadata``) - the same
+    shape a non-streaming ``history[]`` entry has. The message just before a terminal state
+    is re-emitted verbatim in the final event too, so dedupe by ``messageId`` (keep the first
+    occurrence).
 
     The agent's last turn is typically published *twice*: once as a normal message (with its
     own usage) and again as an ``artifact-update`` carrying identical text with no usage of
@@ -141,16 +153,6 @@ def _reconstruct_history_from_stream(stdout: str) -> dict | None:
     entry - and reattach the trailing usage-only event to it (FIFO) - when its text genuinely
     doesn't match anything already recorded.
     """
-    events = []
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line or not line.startswith("{"):
-            continue
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-
     context_id = None
     history: list[dict] = []
     seen_message_ids: set[str] = set()
@@ -206,16 +208,12 @@ def save_invocation_result(logs_dir: Path, problem_id: str, result: dict | str) 
     return out_path
 
 
-def _track_pending_tool_calls(ndjson_line: str, pending: set[str]) -> None:
-    """Update ``pending`` (call ids awaiting a response) from one ``--stream`` NDJSON
-    line. Mirrors the ``status-update``/``message``/``parts`` shape that
-    ``_reconstruct_history_from_stream`` parses -- a part with ``name``+``args``+``id``
+def _track_pending_tool_calls(event: dict, pending: set[str]) -> None:
+    """Update ``pending`` (call ids awaiting a response) from one parsed ``message/stream``
+    event. Mirrors the ``status-update``/``message``/``parts`` shape that
+    ``_reconstruct_history_from_events`` parses -- a part with ``name``+``args``+``id``
     and no ``response`` is a function call; a part with a matching ``id``+``response``
     resolves it."""
-    try:
-        event = json.loads(ndjson_line)
-    except json.JSONDecodeError:
-        return
     if event.get("kind") != "status-update":
         return
     message = (event.get("status") or {}).get("message") or {}
@@ -238,88 +236,91 @@ def invoke_kagent(
     kagent_url: str,
     task: str,
     timeout_seconds: int,
-) -> tuple[int, str, str, bool]:
-    """Shell out to `kagent invoke --stream`, reading its NDJSON output line by line.
+) -> tuple[list[dict], bool, str | None]:
+    """Call kagent-controller's A2A endpoint directly: ``POST /api/a2a/<namespace>/<agent>/``,
+    JSON-RPC 2.0 method ``message/stream``, reading the ``text/event-stream`` (SSE) response
+    one event at a time. This is what the `kagent invoke --stream` CLI command does
+    internally - captured directly off a real invocation via a local proxy - minus the two
+    CLI bugs noted in the module docstring.
 
-    Returns (returncode, stdout, stderr, truncated). ``truncated`` is True when the
-    process exits - on its own, even with returncode 0, or because it ran past
-    ``timeout_seconds + 30`` and got killed - while a tool call is still awaiting its
-    response. kagent-controller has been observed to end a task early (e.g. hitting a
-    RemoteMCPServer's own timeout mid tool-call) and still report the invoke as a
-    normal completion; ``truncated`` just lets main() log that clearly instead of
-    silently trusting a returncode of 0. main() deliberately does NOT retry on this -
-    see its comment for why a client-side retry here is unsafe.
+    Returns (events, truncated, task_id). ``events`` is the list of parsed A2A event objects
+    (the ``result`` field of each JSON-RPC/SSE frame) received before the stream ended.
+    ``truncated`` is True when the stream ends - cleanly or not - while a tool call is still
+    awaiting its response, or when our own ``timeout_seconds`` deadline is hit first.
+    kagent-controller has been observed to end a task early and still report success;
+    ``truncated`` just lets main() log that clearly instead of trusting a clean-looking
+    stream end. main() deliberately does NOT retry on this - see its comment for why a
+    client-side retry here is unsafe.
 
-    Deliberately does NOT kill the subprocess early on its own idle-time heuristic: an
-    earlier version killed it after N seconds of no new stdout lines, but the `kagent`
-    binary's own stdout buffering (unrelated to and uncontrollable via this process's
-    `bufsize`) can legitimately delay a healthy, actively-working turn's NDJSON output
-    for well over a minute with no real stall. Killing the local process there doesn't
-    cancel the task on kagent-controller - it keeps running regardless - so an early
-    kill followed by a retry created a second, genuinely concurrent invocation of the
-    same agent. Only the hard overall deadline below (mirroring the plain synchronous
-    timeout this replaced) is worth killing for.
+    Deliberately does NOT try to cancel the task server-side when ``truncated`` - the A2A
+    ``tasks/cancel`` method is wired up in kagent-controller's passthrough handler, but the
+    Declarative/ADK Python agent runtime backing every SREGym agent returns
+    ``Cancellation is not supported`` for it (confirmed by calling it directly against a
+    live task). The task keeps running server-side regardless of what this function does.
     """
-    command = [
-        "kagent",
-        "invoke",
-        "--agent",
-        agent,
-        "-n",
-        namespace,
-        "--kagent-url",
-        kagent_url,
-        "--task",
-        task,
-        "--timeout",
-        f"{timeout_seconds}s",
-        "--output-format",
-        "json",
-        "--stream",
-    ]
-    logger.info(f"Invoking kagent agent '{agent}' (timeout={timeout_seconds}s)...")
+    url = f"{kagent_url.rstrip('/')}/api/a2a/{namespace}/{agent}/"
+    request_id = str(uuid.uuid4())
+    body = {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "message/stream",
+        "params": {
+            "message": {
+                "kind": "message",
+                "messageId": "",
+                "parts": [{"kind": "text", "text": task}],
+                "role": "user",
+            }
+        },
+    }
+    headers = {"Content-Type": "application/json; charset=utf-8", "Accept": "text/event-stream"}
 
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+    logger.info(f"Invoking kagent agent '{agent}' via A2A (timeout={timeout_seconds}s)...")
 
-    lines: list[str] = []
-    stderr_chunks: list[str] = []
+    events: list[dict] = []
     pending_calls: set[str] = set()
-
-    def _read_stdout() -> None:
-        for raw_line in process.stdout:
-            line = raw_line.rstrip("\n")
-            lines.append(line)
-            _track_pending_tool_calls(line, pending_calls)
-
-    def _read_stderr() -> None:
-        for raw_line in process.stderr:
-            stderr_chunks.append(raw_line)
-
-    stdout_thread = threading.Thread(target=_read_stdout, daemon=True)
-    stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
-    stdout_thread.start()
-    stderr_thread.start()
-
+    task_id: str | None = None
     deadline_exceeded = False
-    deadline = time.time() + timeout_seconds + 30
-    while stdout_thread.is_alive():
-        stdout_thread.join(timeout=1)
-        if time.time() > deadline:
-            deadline_exceeded = True
-            break
+    deadline = time.time() + timeout_seconds
+
+    try:
+        # read timeout is a hard backstop against a truly hung read() call (mirrors the
+        # +30s grace this replaced) - the real ceiling is the deadline checked per-event
+        # below, since a legitimately busy agent can go quiet between SSE frames for a
+        # while with no real stall (kagent-controller's own a2aClientTimeout, set via Helm,
+        # is what would otherwise cut this off server-side - see module docstring).
+        response = requests.post(url, json=body, headers=headers, stream=True, timeout=(10, timeout_seconds + 30))
+        with response:
+            response.raise_for_status()
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if time.time() > deadline:
+                    deadline_exceeded = True
+                    break
+                if not raw_line or not raw_line.startswith("data:"):
+                    continue
+                try:
+                    envelope = json.loads(raw_line[len("data:") :].strip())
+                except json.JSONDecodeError:
+                    continue
+                if "error" in envelope:
+                    logger.warning(f"kagent A2A stream returned an error: {envelope['error']}")
+                    break
+                event = envelope.get("result")
+                if not isinstance(event, dict):
+                    continue
+                events.append(event)
+                task_id = event.get("taskId", task_id)
+                _track_pending_tool_calls(event, pending_calls)
+                if event.get("final"):
+                    break
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"kagent A2A request failed: {e}")
 
     if deadline_exceeded:
-        logger.warning(f"kagent invoke exceeded overall timeout of {timeout_seconds + 30}s; killing subprocess")
-        process.kill()
+        logger.warning(f"kagent A2A call exceeded overall timeout of {timeout_seconds}s")
 
-    stdout_thread.join(timeout=10)
-    stderr_thread.join(timeout=10)
-    returncode = process.wait(timeout=10)
-
-    stdout = "\n".join(lines)
-    stderr = "".join(stderr_chunks)
     truncated = bool(pending_calls) or deadline_exceeded
-    return returncode, stdout, stderr, truncated
+    return events, truncated, task_id
 
 
 def main():
@@ -367,51 +368,43 @@ def main():
     instruction = build_instruction(app_info)
 
     logs_dir = Path(args.logs_dir)
-    try:
-        returncode, stdout, stderr, truncated = invoke_kagent(
-            agent=args.kagent_agent,
-            namespace=args.kagent_namespace,
-            kagent_url=kagent_url,
-            task=instruction,
-            timeout_seconds=args.invoke_timeout,
-        )
-    except subprocess.TimeoutExpired:
-        logger.error("kagent invoke subprocess timed out")
-        returncode, stdout, stderr, truncated = 1, "", "subprocess timeout", True
+    events, truncated, task_id = invoke_kagent(
+        agent=args.kagent_agent,
+        namespace=args.kagent_namespace,
+        kagent_url=kagent_url,
+        task=instruction,
+        timeout_seconds=args.invoke_timeout,
+    )
 
-    if returncode != 0:
-        logger.warning(f"kagent invoke exited with code {returncode}. stderr: {stderr[:2000]}")
-
-    parsed_result = _reconstruct_history_from_stream(stdout)
+    parsed_result = _reconstruct_history_from_events(events)
     if parsed_result is None:
-        try:
-            parsed_result = json.loads(stdout)
-        except json.JSONDecodeError:
-            logger.warning("Could not parse kagent invoke output as NDJSON stream or plain JSON, saving raw text instead")
-            parsed_result = stdout
+        logger.warning("Got no usable history out of the A2A event stream, saving raw events instead")
+        parsed_result = {"taskId": task_id, "raw_events": events}
 
-    save_invocation_result(logs_dir, problem_id, parsed_result if isinstance(parsed_result, dict) else stdout)
+    save_invocation_result(logs_dir, problem_id, parsed_result)
 
     if truncated:
         # Deliberately NOT retried: kagent-controller's task keeps running server-side
         # independent of this client's HTTP call, so re-invoking here would race a
         # second, genuinely concurrent session against the one that (for all we know)
         # is still working - and if the original later submits, its real trajectory
-        # would be clobbered by whatever this discarded retry happened to produce. The
-        # safe move is to just wait: wait_for_run_done() below already polls the
-        # conductor's own /status for the authoritative completion signal, so if the
-        # in-flight invoke was merely reported early (not actually dead), it'll still
-        # be picked up as "done" once it really finishes.
+        # would be clobbered by whatever this discarded retry happened to produce. Also
+        # NOT cancelled - see invoke_kagent()'s docstring, tasks/cancel is unsupported by
+        # the agent runtime. The safe move is to just wait: wait_for_run_done() below
+        # already polls the conductor's own /status for the authoritative completion
+        # signal, so if the in-flight invoke was merely reported early (not actually
+        # dead), it'll still be picked up as "done" once it really finishes.
         logger.warning(
-            "kagent invoke's stream ended on an unanswered tool call - the task may still be "
-            "running server-side on kagent-controller. Not retrying (would race a duplicate "
-            "session); waiting on the conductor's own completion signal instead."
+            f"kagent A2A stream ended on an unanswered tool call (taskId={task_id!r}) - the task may "
+            "still be running server-side on kagent-controller. Not retrying (would race a duplicate "
+            "session) and not cancelling (unsupported by the agent runtime); waiting on the "
+            "conductor's own completion signal instead."
         )
 
     final_stage = wait_for_run_done(timeout=args.done_wait_timeout)
 
     logger.info("=" * 80)
-    logger.info(f"KAgent driver finished. kagent invoke exit={returncode}, final conductor stage={final_stage!r}")
+    logger.info(f"KAgent driver finished. taskId={task_id!r}, final conductor stage={final_stage!r}")
     logger.info("=" * 80)
 
     sys.exit(0 if final_stage == "done" else 1)

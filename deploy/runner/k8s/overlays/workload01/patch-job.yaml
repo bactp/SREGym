@@ -23,7 +23,7 @@ spec:
         - name: runner
           env:
             - name: PROBLEM_ID
-              value: incorrect_image
+              value: astronomy_shop_payment_service_failure
             - name: AGENT_NAME
               value: kagent-workload01
             - name: N_ATTEMPTS

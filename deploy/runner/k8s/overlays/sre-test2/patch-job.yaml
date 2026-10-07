@@ -23,7 +23,7 @@ spec:
         - name: runner
           env:
             - name: PROBLEM_ID
-              value: update_incompatible_correlated
+              value: readiness_probe_misconfiguration_hotel_reservation
             - name: AGENT_NAME
               value: kagent-sre-test2
             - name: N_ATTEMPTS

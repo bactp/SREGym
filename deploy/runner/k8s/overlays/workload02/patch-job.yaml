@@ -23,7 +23,7 @@ spec:
         - name: runner
           env:
             - name: PROBLEM_ID
-              value: incorrect_port_assignment
+              value: wrong_service_selector_astronomy_shop
             - name: AGENT_NAME
               value: kagent-workload02
             - name: N_ATTEMPTS

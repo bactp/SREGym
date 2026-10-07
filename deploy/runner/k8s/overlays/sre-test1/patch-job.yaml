@@ -23,7 +23,7 @@ spec:
         - name: runner
           env:
             - name: PROBLEM_ID
-              value: faulty_image_correlated
+              value: k8s_target_port-misconfig
             - name: AGENT_NAME
               value: kagent-sre-test1
             - name: N_ATTEMPTS

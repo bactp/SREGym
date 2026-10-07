@@ -59,6 +59,17 @@ async def exec_kubectl_cmd_safely(cmd: str, ctx: Context) -> str:
     Args:
         cmd: The command you want to execute in a CLI to
         manage a k8s cluster. It should start with "kubectl".
+
+        This runs a single kubectl command only - no pipes (|), redirects (>, <),
+        or shell operators (&&, ;, ||). Use kubectl's own flags instead (--field-selector,
+        -o jsonpath=..., --tail, grep-equivalent flags, etc.), or call this tool multiple
+        times. Interactive flags (-it, --stdin, --tty, logs -f) are rejected too.
+
+        If you just created a pod with `kubectl run` (e.g. for a connectivity probe), it
+        is not necessarily Running yet - `kubectl exec`/`kubectl logs` against it can fail
+        with a stream error if it's still starting. Check `kubectl get pod <name>` (or
+        `kubectl wait --for=condition=Ready pod/<name>`) first rather than retrying exec/logs
+        blindly against the same not-yet-ready pod.
     Returns:
         The result of trying to execute cmd.
     """

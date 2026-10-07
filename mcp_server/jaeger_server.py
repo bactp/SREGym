@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 
 from fastmcp import FastMCP
 
+from mcp_server.kubectl_server_helper.utils import parse_text
 from mcp_server.utils import ObservabilityClient
 
 logger = logging.getLogger("all.mcp.jaeger_server")
@@ -101,7 +102,7 @@ def get_traces(service: str, last_n_minutes: int) -> str:
         traces = str(response.json()["data"])
         result = traces if traces else "None"
 
-        return result
+        return parse_text(result)
     except Exception as e:
         err_str = f"[ob_mcp] Error querying get_traces: {str(e)}"
         logger.error(err_str)
@@ -129,4 +130,4 @@ def get_dependency_graph(last_n_minutes: int = 30) -> str:
     logger.info(f"[ob_mcp] get_dependency_graph: {response.status_code}")
     result = str(response.json())
 
-    return result
+    return parse_text(result)
